@@ -42,20 +42,40 @@ VocalForge is a Python-based application designed for real-time audio recording,
 
 ## Installation
 
-1. **Clone the Repository**:
+1. **Clone the Repository**:  
    ```bash
    git clone https://github.com/mabubakar87/VocalForge.git
    cd VocalForge
    ```
 
-2. **Install Dependencies**:
+2. **Create and Activate a Virtual Environment**:  
+
+   **Windows**:  
    ```bash
+   python -m venv venv
+   venv\Scripts\activate
+   ```
+
+   **macOS/Linux**:  
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+3. **Upgrade pip and Install Dependencies**:  
+   ```bash
+   pip install --upgrade pip
    pip install -r requirements.txt
    ```
 
-3. **Run the Application**:
+4. **Run the Application**:  
    ```bash
    python main.py
+   ```
+
+5. **Deactivate the Virtual Environment (After Use)**:  
+   ```bash
+   deactivate
    ```
 
 ---
