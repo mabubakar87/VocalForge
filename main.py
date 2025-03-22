@@ -9,14 +9,16 @@ import pyperclip
 import wave
 import re
 import subprocess
+import threading
 import os
 import sys
 import logging
 from datetime import datetime
 import requests
 import array
+from tqdm import tqdm  # Import tqdm for progress bar
 import keyboard  # Import the keyboard module
-
+import shutil
 
 # Set up logging to a file with timestamps
 log_file = os.path.join(os.getcwd(), "vocalforge.log")  # Log file in the current working directory
@@ -49,13 +51,14 @@ def is_internet_available():
 device = "cuda" if is_cuda_available() else "cpu"
 logging.info(f"Using device: {device}")
 
-# List of available models
+# List of available models with sizes
 MODELS = [
-    "distil-small.en",
-    "distil-medium.en",
-    "distil-large-v3",
-    "large-v3-turbo"
+    "",  # Empty string for no default selection
+    "distil-small.en (151 MB)",
+    "distil-medium.en (1.42 GB)",    
+    "large-v3-turbo (3.1 GB)"
 ]
+
 
 # Global variable to store the selected model
 selected_model = MODELS[0]  # Default model
@@ -65,28 +68,66 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Models")
 os.makedirs(MODELS_DIR, exist_ok=True)  # Create the folder if it doesn't exist
 
 def load_model():
-    """Load the selected model."""
+    """Load the selected model in a separate thread."""
     global model, selected_model
-    try:
-        model = WhisperModel(selected_model, device=device, download_root=MODELS_DIR)
-        logging.info(f"Model '{selected_model}' loaded successfully from {MODELS_DIR}.")
-    except Exception as e:
-        logging.error(f"Failed to load model: {e}")
-        if not is_internet_available():
-            messagebox.showerror(
-                "Internet Required",
-                "Internet is required for first-time model downloading. Please connect to the internet and try again."
-            )
-            sys.exit(1)
-        else:
-            raise
+    if not selected_model:  # Check if no model is selected
+        logging.info("No model selected. Please choose a model from the dropdown.")
+        status_label.config(text="No model selected", fg="white")
+        return
+
+    # Update status label to indicate download is starting
+    status_label.config(text=f"Downloading {selected_model}...", fg="white")
+    root.update_idletasks()  # Force update the GUI
+
+    def download_model():
+        """Function to download the model in a separate thread."""
+        try:
+            # Create a progress bar
+            with tqdm(total=100, desc="Downloading", unit="%", ncols=80) as pbar:
+                # Define a callback to update the progress bar
+                def update_progress(current, total):
+                    progress = int((current / total) * 100)
+                    pbar.update(progress - pbar.n)  # Update the progress bar
+                    root.update_idletasks()  # Force update the GUI
+
+                # Load the model
+                global model
+                model = WhisperModel(
+                    selected_model,
+                    device=device,
+                    download_root=MODELS_DIR
+                )
+
+            # Update status label after download
+            status_label.config(text=f"Model '{selected_model}' loaded successfully.", fg="white")
+            logging.info(f"Model '{selected_model}' loaded successfully from {MODELS_DIR}.")
+        except Exception as e:
+            logging.error(f"Failed to load model: {e}")
+            status_label.config(text="Error loading model", fg="red")
+            if not is_internet_available():
+                messagebox.showerror(
+                    "Internet Required",
+                    "Internet is required for first-time model downloading. Please connect to the internet and try again."
+                )
+                sys.exit(1)
+            else:
+                raise
+
+    # Start the download in a separate thread
+    threading.Thread(target=download_model, daemon=True).start()
 
 def on_model_select(event):
     """Handle model selection from the dropdown."""
     global selected_model
-    selected_model = model_combobox.get()
-    logging.info(f"Selected model: {selected_model}")
-    load_model()
+    selected_model_with_size = model_combobox.get()
+    if selected_model_with_size:  # Check if a valid model is selected
+        # Extract the model name (remove the size part)
+        selected_model = selected_model_with_size.split(" (")[0]
+        logging.info(f"Selected model: {selected_model}")
+        load_model()  # Start the download in a separate thread
+    else:
+        logging.info("No model selected.")
+        status_label.config(text="No model selected", fg="white")
 
 audio_queue = queue.Queue()
 recording = False
@@ -214,8 +255,9 @@ frame.pack(pady=10)
 model_label = tk.Label(frame, text="Select Model:", fg="white", bg="#2E2E2E", font=("Arial", 10))
 model_label.pack(pady=5)
 
+# Initialize the Combobox with no default selection
 model_combobox = ttk.Combobox(frame, values=MODELS, state="readonly")
-model_combobox.current(0)  # Set default selection
+model_combobox.set("")  # Set default value to an empty string
 model_combobox.pack(pady=5)
 model_combobox.bind("<<ComboboxSelected>>", on_model_select)
 
