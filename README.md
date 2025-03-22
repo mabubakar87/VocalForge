@@ -37,7 +37,7 @@ VocalForge is a Python-based application designed for real-time audio recording,
   - `requests`
   - `keyboard` (for global hotkey support)
   
-  ## Installation
+## Installation
 
 1. **Clone the Repository**:  
    ```bash
@@ -76,8 +76,6 @@ VocalForge is a Python-based application designed for real-time audio recording,
 
 ---
 
-
----
 
 ## Usage`:
 
