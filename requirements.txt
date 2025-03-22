@@ -3,4 +3,7 @@ numpy
 faster-whisper
 pyautogui
 pyperclip
+wave
 requests
+tqdm
+keyboard
