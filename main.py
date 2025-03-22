@@ -1,7 +1,6 @@
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, filedialog, ttk
 import sounddevice as sd
-import numpy as np
 import queue
 import threading
 from faster_whisper import WhisperModel
@@ -15,9 +14,12 @@ import sys
 import logging
 from datetime import datetime
 import requests
+import array
+import keyboard  # Import the keyboard module
+
 
 # Set up logging to a file with timestamps
-log_file = os.path.join(os.getcwd(), "superwhisper.log")  # Log file in the current working directory
+log_file = os.path.join(os.getcwd(), "vocalforge.log")  # Log file in the current working directory
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -47,22 +49,44 @@ def is_internet_available():
 device = "cuda" if is_cuda_available() else "cpu"
 logging.info(f"Using device: {device}")
 
-try:
-    #model = WhisperModel("distil-medium.en", device=device)    
-    #model = WhisperModel("distil-small.en", device=device)
-    #model = WhisperModel("distil-medium.en", device=device)
-	model = WhisperModel("distil-large-v3", device=device)
-	logging.info("Model loaded successfully.")
-except Exception as e:
-    logging.error(f"Failed to load model: {e}")
-    if not is_internet_available():
-        messagebox.showerror(
-            "Internet Required",
-            "Internet is required for first-time model downloading. Please connect to the internet and try again."
-        )
-        sys.exit(1)
-    else:
-        raise
+# List of available models
+MODELS = [
+    "distil-small.en",
+    "distil-medium.en",
+    "distil-large-v3",
+    "large-v3-turbo"
+]
+
+# Global variable to store the selected model
+selected_model = MODELS[0]  # Default model
+
+# Create a Models folder next to the script
+MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Models")
+os.makedirs(MODELS_DIR, exist_ok=True)  # Create the folder if it doesn't exist
+
+def load_model():
+    """Load the selected model."""
+    global model, selected_model
+    try:
+        model = WhisperModel(selected_model, device=device, download_root=MODELS_DIR)
+        logging.info(f"Model '{selected_model}' loaded successfully from {MODELS_DIR}.")
+    except Exception as e:
+        logging.error(f"Failed to load model: {e}")
+        if not is_internet_available():
+            messagebox.showerror(
+                "Internet Required",
+                "Internet is required for first-time model downloading. Please connect to the internet and try again."
+            )
+            sys.exit(1)
+        else:
+            raise
+
+def on_model_select(event):
+    """Handle model selection from the dropdown."""
+    global selected_model
+    selected_model = model_combobox.get()
+    logging.info(f"Selected model: {selected_model}")
+    load_model()
 
 audio_queue = queue.Queue()
 recording = False
@@ -76,29 +100,29 @@ def callback(indata, frames, time, status):
 def record_audio():
     global recording
     recording = True
-    audio_data = []
+    audio_data = array.array("h")  # 16-bit signed integers
     try:
-        with sd.InputStream(samplerate=16000, channels=1, callback=callback):
+        with sd.InputStream(samplerate=16000, channels=1, dtype="int16", callback=callback):
             while recording:
-                audio_data.append(audio_queue.get())
-        return np.concatenate(audio_data, axis=0)
+                audio_data.extend(audio_queue.get().flatten())  # Convert to 1D array
+        return audio_data
     except Exception as e:
         logging.error(f"Error during audio recording: {e}")
         raise
 
-def save_wav(filename, data, samplerate=16000):
+def save_wav(filename, data, samplerate=16000):    
     try:
         with wave.open(filename, 'wb') as wf:
             wf.setnchannels(1)
-            wf.setsampwidth(2)
+            wf.setsampwidth(2)  # 16-bit audio
             wf.setframerate(samplerate)
-            wf.writeframes((data * 32767).astype(np.int16).tobytes())
+            wf.writeframes(data.tobytes())  # Convert array to bytes
         logging.info(f"Audio saved to {filename}.")
     except Exception as e:
         logging.error(f"Error saving WAV file: {e}")
         raise
 
-def toggle_recording():
+def toggle_recording(event=None):  # Add event parameter for key binding
     global recording, processing
     if not recording:
         text_output.delete(1.0, tk.END)
@@ -130,6 +154,17 @@ def format_text(text):
     text = re.sub(r'([.,;:!?])([^\s])', r'\1 \2', text)
     return text
 
+def save_transcript(text):
+    """Save the transcribed text to a file with a timestamp."""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"transcript_{timestamp}.txt"
+        with open(filename, "w", encoding="utf-8") as file:
+            file.write(text)
+        logging.info(f"Transcript saved to {filename}.")
+    except Exception as e:
+        logging.error(f"Error saving transcript: {e}")
+
 def transcribe_audio(file_path):
     try:
         segments, _ = model.transcribe(file_path)
@@ -138,6 +173,7 @@ def transcribe_audio(file_path):
         insert_text(formatted_text)
         text_output.delete(1.0, tk.END)
         text_output.insert(tk.END, formatted_text)
+        save_transcript(formatted_text)  # Save the transcript to a file
         logging.info("Transcription completed successfully.")
         status_label.config(text="Transcription Completed", fg="white")
     except Exception as e:
@@ -166,13 +202,22 @@ def upload_audio():
 # Create the main window
 root = tk.Tk()
 root.title("SuperWhisper GUI")
-root.geometry("500x450")
+root.geometry("500x500")  # Increased height to accommodate the dropdown
 root.configure(bg="#2E2E2E")
 root.resizable(True, True)
 
 # Create a frame for the status label and record button
 frame = tk.Frame(root, bg="#2E2E2E")
-frame.pack(pady=20)
+frame.pack(pady=10)
+
+# Dropdown for model selection
+model_label = tk.Label(frame, text="Select Model:", fg="white", bg="#2E2E2E", font=("Arial", 10))
+model_label.pack(pady=5)
+
+model_combobox = ttk.Combobox(frame, values=MODELS, state="readonly")
+model_combobox.current(0)  # Set default selection
+model_combobox.pack(pady=5)
+model_combobox.bind("<<ComboboxSelected>>", on_model_select)
 
 # Status label
 status_label = tk.Label(frame, text="Start Recording", fg="white", bg="#2E2E2E", font=("Arial", 12))
@@ -232,13 +277,23 @@ def auto_hide_scrollbar():
     else:  # Scrollbar is needed
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+def global_hotkey_listener():
+    keyboard.add_hotkey("ctrl+q", toggle_recording)  # Register the hotkey globally
+    keyboard.wait()  # Keep the listener running
+
+# Run the hotkey listener in a separate thread
+hotkey_thread = threading.Thread(target=global_hotkey_listener, daemon=True)
+hotkey_thread.start()
+
 # Bind the auto-hide function to the Text widget
 text_output.bind("<Configure>", lambda e: auto_hide_scrollbar())
 text_output.bind("<MouseWheel>", lambda e: auto_hide_scrollbar())
 
-
 # Configure the rounded frame style
 style.configure("Rounded.TFrame", background="#1E1E1E", borderwidth=0, relief="flat", bordercolor="#1E1E1E", lightcolor="#1E1E1E", darkcolor="#1E1E1E", borderradius=10)
+
+# Load the default model
+load_model()
 
 # Run the application
 root.mainloop()
