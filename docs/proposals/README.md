@@ -14,8 +14,8 @@ Before implementing an engine:
 | File | Capability | Status |
 |------|------------|--------|
 | `alignment.md` | Forced word alignment | Stub — fill before implement |
-| `diarization.md` | Speaker diarization | Stub — fill before implement |
-| `enhancement.md` | Speech enhancement / denoising | Stub — fill before implement |
+| `diarization.md` | Speaker diarization | Approved — P4-020 shipped |
+| `enhancement.md` | Speech enhancement / denoising | Approved — P4-060 shipped |
 | `separation.md` | Music / vocal source separation | Stub — fill before implement |
 
 Base runtime: `requirements.txt`. Optional stacks: `requirements-extras.txt`.

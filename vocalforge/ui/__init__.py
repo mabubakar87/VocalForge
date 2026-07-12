@@ -54,9 +54,14 @@ SESSION_TOOLTIPS = {
         "profile on the selected device. GPU is disabled when CUDA is not usable."
     ),
     "language": (
-        "Language spoken in the audio. Auto-detect lets the model guess; "
+        "Language spoken in the audio (source). Auto-detect lets the model guess; "
         "pick a language for better accuracy when you know it. "
-        "Only available on High Accuracy (multilingual) profiles."
+        "Does not change output language — use Translate for Chinese/etc. → English. "
+        "Available on Multilingual Small / Medium and High Accuracy profiles."
+    ),
+    "translate": (
+        "Whisper speech→English translation. Requires Multilingual Small or "
+        "Medium (faster-whisper-small / medium). large-v3-turbo cannot translate."
     ),
     "microphone": (
         "Input device used for recording. System default follows your OS setting; "
@@ -79,6 +84,12 @@ SESSION_TOOLTIPS = {
     "enhance": (
         "When On, WAV recordings/uploads are denoised with DeepFilterNet before "
         "transcription. Default Off. Requires .deps/deep-filter and soxr."
+    ),
+    "diarize": (
+        "When On, speakers are labeled with pyannote before transcription. "
+        "Uses GPU when CUDA torch is available (Whisper is unloaded briefly "
+        "to free VRAM). Needs two different voices for SPEAKER_00 vs SPEAKER_01. "
+        "Vendor once: python scripts/vendor_diarization_models.py"
     ),
     "history": (
         "Reload a previously saved transcript from this session’s transcripts folder."
@@ -107,7 +118,7 @@ class SetupDashboard(tk.Toplevel):
         self.configure(bg=Theme.bg)
         self._ui_font = resolve_ui_font_family(self)
         self.geometry("920x900")
-        self.minsize(820, 820)
+        self.minsize(820, 600)
         self.capabilities = capabilities
         self.paths = paths
         self.config = config
@@ -124,6 +135,8 @@ class SetupDashboard(tk.Toplevel):
         self._language_label_by_id = {mode_id: label for mode_id, label, _lang, _task in LANGUAGE_OPTIONS}
         self._table_host: tk.Frame | None = None
         self._body: tk.Frame | None = None
+        self._scroll_shell: tk.Frame | None = None
+        self._scroll_canvas: tk.Canvas | None = None
         self._built = False
         self.protocol("WM_DELETE_WINDOW", self._close)
         # Show the window immediately; this Tk build is slow to create many widgets (~2s).
@@ -164,6 +177,9 @@ class SetupDashboard(tk.Toplevel):
         for child in self._table_host.winfo_children():
             child.destroy()
         self._build_profiles_table(self._table_host)
+        self._bind_setup_mousewheel()
+        if self._scroll_canvas is not None:
+            self._scroll_canvas.configure(scrollregion=self._scroll_canvas.bbox("all"))
 
     def _default_device_choice(self) -> str:
         if self.controller.transcription.is_ready:
@@ -185,17 +201,57 @@ class SetupDashboard(tk.Toplevel):
         return self._default_device_choice()
 
     def _build(self) -> None:
-        if self._body is not None:
-            self._body.destroy()
-        self._body = tk.Frame(self, bg=Theme.bg)
-        self._body.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
-        self._build_system_spec(self._body)
-        self._table_host = tk.Frame(self._body, bg=Theme.bg)
+        if self._scroll_shell is not None:
+            self._scroll_shell.destroy()
+            self._scroll_shell = None
+            self._scroll_canvas = None
+            self._body = None
+
+        self._scroll_shell = tk.Frame(self, bg=Theme.bg)
+        self._scroll_shell.pack(fill=tk.BOTH, expand=True)
+
+        self._scroll_canvas = tk.Canvas(
+            self._scroll_shell,
+            bg=Theme.bg,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        scrollbar = tk.Scrollbar(
+            self._scroll_shell,
+            orient=tk.VERTICAL,
+            command=self._scroll_canvas.yview,
+        )
+        self._scroll_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._body = tk.Frame(self._scroll_canvas, bg=Theme.bg)
+        self._scroll_window = self._scroll_canvas.create_window(
+            (0, 0), window=self._body, anchor="nw"
+        )
+
+        def _on_body_configure(_event=None) -> None:
+            if self._scroll_canvas is None:
+                return
+            self._scroll_canvas.configure(scrollregion=self._scroll_canvas.bbox("all"))
+
+        def _on_canvas_configure(event) -> None:
+            if self._scroll_canvas is None:
+                return
+            self._scroll_canvas.itemconfigure(self._scroll_window, width=event.width)
+
+        self._body.bind("<Configure>", _on_body_configure)
+        self._scroll_canvas.bind("<Configure>", _on_canvas_configure)
+
+        content = tk.Frame(self._body, bg=Theme.bg)
+        content.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
+        self._build_system_spec(content)
+        self._table_host = tk.Frame(content, bg=Theme.bg)
         self._table_host.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
         self._build_profiles_table(self._table_host)
-        self._build_optional_extras(self._body)
+        self._build_optional_extras(content)
         hoverable_button(
-            self._body,
+            content,
             text="Close",
             command=self._close,
             font_family=self._ui_font,
@@ -205,6 +261,38 @@ class SetupDashboard(tk.Toplevel):
             padx=18,
             pady=8,
         ).pack(pady=(14, 0))
+        self._bind_setup_mousewheel()
+        self.after_idle(_on_body_configure)
+
+    def _on_setup_mousewheel(self, event) -> str | None:
+        if self._scroll_canvas is None or not self.winfo_exists():
+            return None
+        if getattr(event, "num", None) == 4:
+            self._scroll_canvas.yview_scroll(-3, "units")
+        elif getattr(event, "num", None) == 5:
+            self._scroll_canvas.yview_scroll(3, "units")
+        else:
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta == 0:
+                return None
+            # Windows: multiples of 120; macOS: smaller values.
+            steps = -1 * int(delta / 120) if abs(delta) >= 120 else (-1 if delta > 0 else 1)
+            self._scroll_canvas.yview_scroll(steps, "units")
+        return "break"
+
+    def _bind_setup_mousewheel(self) -> None:
+        """Bind wheel events on Setup widgets (not bind_all — avoids stealing main UI)."""
+        root = self._scroll_shell
+        if root is None:
+            return
+
+        def _walk(widget: tk.Misc) -> None:
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                widget.bind(seq, self._on_setup_mousewheel, add="+")
+            for child in widget.winfo_children():
+                _walk(child)
+
+        _walk(root)
 
     def _close(self) -> None:
         self.on_settings_changed()
@@ -296,8 +384,10 @@ class SetupDashboard(tk.Toplevel):
         tk.Label(
             section,
             text=(
-                "Speech enhancement is unlocked when deep-filter + soxr are available. "
-                "Other extras still need an approved proposal before enablement."
+                "Speech enhancement unlocks with deep-filter + soxr. "
+                "Speaker diarization unlocks after vendoring offline weights "
+                "(scripts/vendor_diarization_models.py → Models/diarization/). "
+                "HF token is only needed for that one-time download."
             ),
             fg=Theme.muted,
             bg=Theme.surface,
@@ -307,15 +397,59 @@ class SetupDashboard(tk.Toplevel):
             anchor="w",
         ).pack(fill=tk.X, pady=(0, 10))
 
+        token_row = tk.Frame(section, bg=Theme.surface)
+        token_row.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(
+            token_row,
+            text="Hugging Face token",
+            fg=Theme.text,
+            bg=Theme.surface,
+            font=(self._ui_font, 9, "bold"),
+            anchor="w",
+        ).pack(side=tk.LEFT)
+        self._hf_token_var = tk.StringVar(value=self.config.hf_token or "")
+        token_entry = tk.Entry(
+            token_row,
+            textvariable=self._hf_token_var,
+            show="•",
+            width=36,
+            bg=Theme.surface_2,
+            fg=Theme.text,
+            insertbackground=Theme.text,
+            relief=tk.FLAT,
+            font=(self._ui_font, 9),
+        )
+        token_entry.pack(side=tk.LEFT, padx=(10, 8))
+        tk.Button(
+            token_row,
+            text="Save token",
+            command=self._save_hf_token,
+            bg=Theme.surface_2,
+            fg=Theme.text,
+            relief=tk.FLAT,
+            font=(self._ui_font, 9),
+            padx=10,
+            pady=4,
+            cursor="hand2",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            token_row,
+            text="Or set HF_TOKEN in the environment",
+            fg=Theme.muted,
+            bg=Theme.surface,
+            font=(self._ui_font, 8),
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
         grid = tk.Frame(section, bg=Theme.surface)
         grid.pack(fill=tk.X)
-        for column in range(2):
-            grid.grid_columnconfigure(column, weight=1, uniform="extras")
+        extras = list(probe_all(hf_token=self.config.hf_token))
+        columns = max(1, len(extras))
+        for column in range(columns):
+            grid.grid_columnconfigure(column, weight=1, uniform="extras", minsize=140)
 
-        for index, (extra, status) in enumerate(probe_all()):
-            row, column = divmod(index, 2)
-            cell = tk.Frame(grid, bg=Theme.surface_2, padx=12, pady=10)
-            cell.grid(row=row, column=column, sticky="nsew", padx=4, pady=4)
+        for index, (extra, status) in enumerate(extras):
+            cell = tk.Frame(grid, bg=Theme.surface_2, padx=10, pady=10)
+            cell.grid(row=0, column=index, sticky="nsew", padx=4, pady=4)
             title = tk.Frame(cell, bg=Theme.surface_2)
             title.pack(fill=tk.X)
             tk.Label(
@@ -325,7 +459,8 @@ class SetupDashboard(tk.Toplevel):
                 bg=Theme.surface_2,
                 font=(self._ui_font, 10, "bold"),
                 anchor="w",
-            ).pack(side=tk.LEFT)
+                wraplength=120,
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
             status_fg = Theme.muted if status is ExtraStatus.NOT_INSTALLED else Theme.warning
             if status is ExtraStatus.READY:
                 status_fg = Theme.success
@@ -337,47 +472,84 @@ class SetupDashboard(tk.Toplevel):
                 font=(self._ui_font, 8, "bold"),
                 anchor="e",
             ).pack(side=tk.RIGHT)
-            tk.Label(
+            summary = tk.Label(
                 cell,
                 text=extra.summary,
                 fg=Theme.muted,
                 bg=Theme.surface_2,
                 font=(self._ui_font, 9),
-                wraplength=400,
+                wraplength=140,
                 justify="left",
                 anchor="w",
-            ).pack(fill=tk.X, pady=(6, 0))
+            )
+            summary.pack(fill=tk.X, pady=(6, 0))
             engines = ", ".join(extra.candidate_engines)
-            tk.Label(
+            meta = tk.Label(
                 cell,
                 text=f"Candidates: {engines}  ·  {extra.proposal_doc}",
                 fg=Theme.muted,
                 bg=Theme.surface_2,
                 font=(self._ui_font, 8),
-                wraplength=400,
+                wraplength=140,
                 justify="left",
                 anchor="w",
-            ).pack(fill=tk.X, pady=(4, 0))
+            )
+            meta.pack(fill=tk.X, pady=(4, 0))
             if extra.id == "enhancement" and status is ExtraStatus.READY:
                 tk.Label(
                     cell,
-                    text="Control: home screen → Enhance",
+                    text="Control: home → Enhance",
+                    fg=Theme.muted,
+                    bg=Theme.surface_2,
+                    font=(self._ui_font, 8),
+                    anchor="w",
+                ).pack(fill=tk.X, pady=(6, 0))
+            if extra.id == "diarization" and status is ExtraStatus.READY:
+                tk.Label(
+                    cell,
+                    text="Control: home → Diarize",
                     fg=Theme.muted,
                     bg=Theme.surface_2,
                     font=(self._ui_font, 8),
                     anchor="w",
                 ).pack(fill=tk.X, pady=(6, 0))
 
+            def _sync_wrap(event, labels=(summary, meta), title_lbl=title.winfo_children()[0]) -> None:
+                width = max(60, int(event.width) - 16)
+                for lbl in labels:
+                    if int(lbl.cget("wraplength") or 0) != width:
+                        lbl.configure(wraplength=width)
+                if int(title_lbl.cget("wraplength") or 0) != width:
+                    title_lbl.configure(wraplength=width)
+
+            cell.bind("<Configure>", _sync_wrap)
+
+    def _save_hf_token(self) -> None:
+        raw = (self._hf_token_var.get() or "").strip()
+        self.config.hf_token = raw or None
+        save_config(self.config_path, self.config)
+        self.controller.set_hf_token(self.config.hf_token)
+        self.on_settings_changed()
+        messagebox.showinfo(
+            "Token saved",
+            "Hugging Face token stored in local config.json (gitignored).\n"
+            "Re-open Setup to refresh diarization status, or restart the app.",
+        )
+
     def _build_profiles_table(self, parent: tk.Frame) -> None:
         table = tk.Frame(parent, bg=Theme.bg)
         table.pack(fill=tk.BOTH, expand=True)
+        profile_count = len(PROFILE_ORDER)
+        # Row labels stay narrow; every profile column shares leftover width equally.
         table.grid_columnconfigure(0, weight=0, minsize=110)
-        for column in range(1, 4):
-            table.grid_columnconfigure(column, weight=1, uniform="profiles")
+        for column in range(1, profile_count + 1):
+            table.grid_columnconfigure(column, weight=1, uniform="profiles", minsize=120)
+        self._profiles_table = table
         self._table_cell(table, 0, 0, "", bold=True, bg=Theme.bg)
         for column, profile_id in enumerate(PROFILE_ORDER, start=1):
             profile = PROFILES[profile_id]
-            title = profile.label
+            size = profile.size_label.lstrip("~").strip()
+            title = f"{profile.label} ({size})"
             badges = []
             if profile_id == self.recommendation.profile_id:
                 badges.append("Recommended")
@@ -389,8 +561,6 @@ class SetupDashboard(tk.Toplevel):
         row_specs = [
             ("Description", "description"),
             ("Model", "model"),
-            ("Device", "device"),
-            ("Compute", "compute"),
             ("Language", "language"),
             ("Status", "status"),
         ]
@@ -413,16 +583,16 @@ class SetupDashboard(tk.Toplevel):
 
     def _profile_field(self, profile_id: str, key: str) -> str:
         profile = PROFILES[profile_id]
-        runtime = resolve_runtime(profile, self.capabilities, preferred_device=self._preferred_device())
+        # Setup comparison uses each profile's designed preferred device, not the
+        # home Processing override (which would make every column look like int8 on CPU).
+        runtime = resolve_runtime(
+            profile, self.capabilities, preferred_device=profile.preferred_device
+        )
         local = is_model_available_locally(self.paths.models, profile)
         if key == "description":
             return profile.description
         if key == "model":
-            return profile.model
-        if key == "device":
-            return runtime.device
-        if key == "compute":
-            return runtime.compute_type
+            return f"{profile.model} ({runtime.compute_type})"
         if key == "status":
             return "Ready locally" if local else f"Download needed ({profile.size_label})"
         if key == "language":
@@ -468,14 +638,17 @@ class SetupDashboard(tk.Toplevel):
     def _on_language_selected(self, label: str) -> None:
         mode_id = self._language_labels.get(label, "auto")
         self._language_mode.set(mode_id)
-        language, task = language_settings_for_mode(mode_id)
+        language, _default_task = language_settings_for_mode(mode_id)
+        # Preserve Translate-to-English if already enabled.
+        task = "translate" if self.config.task == "translate" else "transcribe"
         self.config.language = language
         self.config.task = task
         save_config(self.config_path, self.config)
 
-        # Language belongs to High Accuracy — activate that profile if needed.
-        if self.config.active_profile != "high_accuracy":
-            self._activate("high_accuracy")
+        # Language/translate need a multilingual profile.
+        active = PROFILES.get(self.config.active_profile)
+        if active is None or active.english_only:
+            self._activate("multilingual_small")
             return
 
         self.controller.transcription.set_language_settings(language, task)
@@ -507,7 +680,7 @@ class SetupDashboard(tk.Toplevel):
     ) -> None:
         cell = tk.Frame(parent, bg=bg, padx=8, pady=8)
         cell.grid(row=row, column=column, sticky="nsew", padx=4, pady=2)
-        tk.Label(
+        label = tk.Label(
             cell,
             text=text,
             fg=Theme.text if bold else Theme.muted,
@@ -515,8 +688,17 @@ class SetupDashboard(tk.Toplevel):
             font=(self._ui_font, 10, "bold" if bold else "normal"),
             justify="center" if center else "left",
             anchor=anchor if not center else "center",
-            wraplength=220 if column else 100,
-        ).pack(fill=tk.BOTH, expand=True)
+            wraplength=80,
+        )
+        label.pack(fill=tk.BOTH, expand=True)
+
+        def _sync_wrap(event, lbl=label) -> None:
+            # Keep text wrapping matched to the equal-width profile column.
+            width = max(48, int(event.width) - 8)
+            if int(lbl.cget("wraplength") or 0) != width:
+                lbl.configure(wraplength=width)
+
+        cell.bind("<Configure>", _sync_wrap)
 
     def _add_action_button(self, parent: tk.Frame, profile_id: str) -> None:
         profile = PROFILES[profile_id]
@@ -547,7 +729,7 @@ class SetupDashboard(tk.Toplevel):
             )
             if not self.controller.can_change_profile():
                 btn.configure(state="disabled")
-        btn.pack(fill=tk.X)
+        btn.pack(fill=tk.X, expand=True)
 
     def _activate(self, profile_id: str) -> None:
         if not self.controller.can_change_profile():
@@ -573,7 +755,11 @@ class SetupDashboard(tk.Toplevel):
         self.config.preferred_device = preferred
         if not profile.english_only:
             mode_id = self._language_mode.get()
-            language, task = language_settings_for_mode(mode_id)
+            language, _default_task = language_settings_for_mode(mode_id)
+            task = "translate" if self.config.task == "translate" else "transcribe"
+            language, task = resolve_language_settings(
+                profile, language=language, task=task
+            )
             self.config.language = language
             self.config.task = task
         save_config(self.config_path, self.config)
@@ -735,7 +921,7 @@ class MainWindow:
 
         row2 = tk.Frame(info, bg=Theme.surface)
         row2.pack(fill=tk.X, pady=(2, 0))
-        for column in range(4):
+        for column in range(5):
             row2.grid_columnconfigure(column, weight=1, uniform="session2")
 
         self._vad_body = self._session_body(row2, 0, 0, "VAD", tooltip=SESSION_TOOLTIPS["vad"])
@@ -804,6 +990,50 @@ class MainWindow:
                 font=(self._ui_font, 9),
                 anchor="w",
             ).pack(fill=tk.X)
+
+        self._diarize_body = self._session_body(
+            row2, 0, 4, "Diarize", tooltip=SESSION_TOOLTIPS["diarize"]
+        )
+        from vocalforge.diarization import is_diarization_ready
+
+        diarize_ready = is_diarization_ready(
+            self.config.hf_token, models_root=self.paths.models
+        )
+        if self.config.diarize_speakers and not diarize_ready:
+            self.config.diarize_speakers = False
+            save_config(self.config_path, self.config)
+            self.controller.set_diarize_speakers(False)
+        self._diarize_var = tk.StringVar(value="on" if self.config.diarize_speakers else "off")
+        if diarize_ready:
+            SegmentedControl(
+                self._diarize_body,
+                options=(("on", "On"), ("off", "Off")),
+                variable=self._diarize_var,
+                command=self._on_diarize_speakers_changed,
+                font_family=self._ui_font,
+            ).pack(anchor="w")
+        else:
+            tk.Label(
+                self._diarize_body,
+                text="Not installed",
+                fg=Theme.muted,
+                bg=Theme.surface_2,
+                font=(self._ui_font, 9),
+                anchor="w",
+            ).pack(fill=tk.X)
+
+        row3 = tk.Frame(info, bg=Theme.surface)
+        row3.pack(fill=tk.X, pady=(2, 0))
+        for column in range(5):
+            row3.grid_columnconfigure(column, weight=1, uniform="session3")
+
+        self._translate_body = self._session_body(
+            row3, 0, 0, "Translate", tooltip=SESSION_TOOLTIPS["translate"]
+        )
+        self._translate_var = tk.StringVar(
+            value="on" if self.config.task == "translate" else "off"
+        )
+        self._refresh_translate_control()
 
         self._refresh_profile_label()
         self._refresh_mic_control()
@@ -1036,11 +1266,22 @@ class MainWindow:
 
     def _on_home_language_selected(self, label: str) -> None:
         mode_id = self._language_labels.get(label, "auto")
-        language, task = language_settings_for_mode(mode_id)
+        language, _default_task = language_settings_for_mode(mode_id)
+        task = "translate" if self.config.task == "translate" else "transcribe"
+        profile = PROFILES.get(self.config.active_profile)
+        if profile is not None and profile.english_only:
+            task = "transcribe"
+        language, task = resolve_language_settings(
+            profile or PROFILES["high_accuracy"],
+            language=language,
+            task=task,
+        )
         self.config.language = language
         self.config.task = task
         save_config(self.config_path, self.config)
         self.controller.transcription.set_language_settings(language, task)
+        if hasattr(self, "_translate_var"):
+            self._translate_var.set("on" if task == "translate" else "off")
         if self._setup_win is not None:
             try:
                 if self._setup_win.winfo_exists():
@@ -1048,6 +1289,72 @@ class MainWindow:
             except tk.TclError:
                 pass
         self._set_status(f"Language set to {label}.")
+
+    def _refresh_translate_control(self) -> None:
+        body = getattr(self, "_translate_body", None)
+        if body is None:
+            return
+        for child in body.winfo_children():
+            child.destroy()
+        profile = PROFILES.get(self.config.active_profile)
+        can_translate = profile is not None and profile.supports_translate
+        if self.config.task == "translate" and not can_translate:
+            self.config.task = "transcribe"
+            save_config(self.config_path, self.config)
+            lang = self.config.language if profile and not profile.english_only else "en"
+            self.controller.transcription.set_language_settings(lang, "transcribe")
+        self._translate_var = tk.StringVar(
+            value="on" if self.config.task == "translate" else "off"
+        )
+        if can_translate:
+            SegmentedControl(
+                body,
+                options=(("on", "On"), ("off", "Off")),
+                variable=self._translate_var,
+                command=self._on_translate_changed,
+                font_family=self._ui_font,
+            ).pack(anchor="w")
+        else:
+            reason = "Use Multilingual Small"
+            if profile is not None and profile.english_only:
+                reason = "English-only model"
+            elif profile is not None and profile.id == "high_accuracy":
+                reason = "Not on turbo"
+            tk.Label(
+                body,
+                text=reason,
+                fg=Theme.muted,
+                bg=Theme.surface_2,
+                font=(self._ui_font, 9),
+                anchor="w",
+            ).pack(fill=tk.X)
+
+    def _on_translate_changed(self) -> None:
+        enabled = self._translate_var.get() == "on"
+        profile = PROFILES.get(self.config.active_profile)
+        if enabled and (profile is None or not profile.supports_translate):
+            self._translate_var.set("off")
+            messagebox.showwarning(
+                "Translate Unavailable",
+                "This profile’s model cannot translate to English.\n\n"
+                "Activate Multilingual Small or Medium (faster-whisper-small / "
+                "medium) for speech→English translation. High Accuracy "
+                "(large-v3-turbo) does not support translate.",
+            )
+            return
+        self.config.task = "translate" if enabled else "transcribe"
+        language, task = resolve_language_settings(
+            profile or PROFILES["high_accuracy"],
+            language=self.config.language,
+            task=self.config.task,
+        )
+        self.config.language = language
+        self.config.task = task
+        save_config(self.config_path, self.config)
+        self.controller.transcription.set_language_settings(language, task)
+        self._set_status(
+            "Translate to English enabled." if task == "translate" else "Transcription mode (no translate)."
+        )
 
     def _refresh_mic_control(self) -> None:
         for child in self._mic_body.winfo_children():
@@ -1109,6 +1416,25 @@ class MainWindow:
         save_config(self.config_path, self.config)
         self.controller.set_enhance_audio(enabled)
         self._set_status(f"Audio enhancement {'enabled' if enabled else 'disabled'}.")
+
+    def _on_diarize_speakers_changed(self) -> None:
+        enabled = self._diarize_var.get() == "on"
+        from vocalforge.diarization import is_diarization_ready
+
+        if enabled and not is_diarization_ready(
+            self.config.hf_token, models_root=self.paths.models
+        ):
+            self._diarize_var.set("off")
+            messagebox.showwarning(
+                "Diarization Unavailable",
+                "Offline diarization weights are missing.\n"
+                "Run: PYTHONPATH=. python scripts/vendor_diarization_models.py",
+            )
+            return
+        self.config.diarize_speakers = enabled
+        save_config(self.config_path, self.config)
+        self.controller.set_diarize_speakers(enabled)
+        self._set_status(f"Speaker diarization {'enabled' if enabled else 'disabled'}.")
 
     def _on_device_preference_changed(self) -> None:
         choice = self._device_var.get()
@@ -1255,6 +1581,7 @@ class MainWindow:
         if preferred in {"cpu", "cuda"} and self._device_var.get() != preferred:
             self._device_var.set(preferred)
         self._refresh_language_control()
+        self._refresh_translate_control()
 
     def open_setup(self) -> None:
         if self._setup_win is not None:

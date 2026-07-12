@@ -1,12 +1,13 @@
 """Optional advanced-pipeline capability registry (Phase 4).
 
-Probes are import-only. They never download models or load heavy weights.
+Probes are lightweight. They never download models or load heavy weights.
 Base transcription must work when every extra reports not_installed.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Sequence
@@ -15,7 +16,7 @@ from typing import Sequence
 class ExtraStatus(str, Enum):
     NOT_INSTALLED = "not_installed"
     INSTALLED = "installed"  # importable; not yet gated/wired as READY
-    READY = "ready"  # reserved for post-approval integration
+    READY = "ready"  # usable (deps + token/cache as required)
 
 
 @dataclass(frozen=True)
@@ -27,8 +28,8 @@ class ExtraCapability:
     import_names: tuple[str, ...]
     proposal_doc: str
 
-    def probe(self) -> ExtraStatus:
-        """Return status for Setup. Enhancement is READY when the CLI path works."""
+    def probe(self, *, hf_token: str | None = None) -> ExtraStatus:
+        """Return Setup status. Optional hf_token comes from config / env."""
         if self.id == "enhancement":
             try:
                 from vocalforge.enhancement import is_enhancement_available
@@ -38,6 +39,23 @@ class ExtraCapability:
             except Exception:  # noqa: BLE001
                 pass
             return ExtraStatus.NOT_INSTALLED
+
+        if self.id == "diarization":
+            try:
+                from vocalforge.diarization import (
+                    is_diarization_ready,
+                    is_pyannote_importable,
+                )
+
+                if not is_pyannote_importable():
+                    return ExtraStatus.NOT_INSTALLED
+                if is_diarization_ready(hf_token):
+                    return ExtraStatus.READY
+                # Library present but offline weights not vendored yet.
+                return ExtraStatus.NOT_INSTALLED
+            except Exception:  # noqa: BLE001
+                return ExtraStatus.NOT_INSTALLED
+
         for name in self.import_names:
             try:
                 importlib.import_module(name)
@@ -66,9 +84,12 @@ EXTRAS: dict[str, ExtraCapability] = {
     "diarization": ExtraCapability(
         id="diarization",
         label="Speaker diarization",
-        summary="Label who spoke when. May require model license acceptance.",
-        candidate_engines=("PyAnnote", "WhisperX"),
-        import_names=("pyannote.audio", "whisperx"),
+        summary=(
+            "Label who spoke when (offline pyannote community-1 under Models/). "
+            "Vendor once: scripts/vendor_diarization_models.py."
+        ),
+        candidate_engines=("PyAnnote community-1",),
+        import_names=("pyannote.audio",),
         proposal_doc="docs/proposals/diarization.md",
     ),
     "enhancement": ExtraCapability(
@@ -76,7 +97,6 @@ EXTRAS: dict[str, ExtraCapability] = {
         label="Speech enhancement",
         summary="Optional denoising before transcription (DeepFilterNet CLI + soxr).",
         candidate_engines=("DeepFilterNet",),
-        # Prefer Rust CLI probe via vocalforge.enhancement; import names are fallback.
         import_names=("df", "deepfilternet"),
         proposal_doc="docs/proposals/enhancement.md",
     ),
@@ -103,5 +123,8 @@ def status_label(status: ExtraStatus) -> str:
     }[status]
 
 
-def probe_all() -> list[tuple[ExtraCapability, ExtraStatus]]:
-    return [(extra, extra.probe()) for extra in list_extras()]
+def probe_all(hf_token: str | None = None) -> list[tuple[ExtraCapability, ExtraStatus]]:
+    token = hf_token
+    if token is None:
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    return [(extra, extra.probe(hf_token=token)) for extra in list_extras()]

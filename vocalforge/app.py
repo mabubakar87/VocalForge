@@ -86,6 +86,8 @@ def run() -> None:
         word_timestamps=config.word_timestamps,
     )
     controller.set_enhance_audio(config.enhance_audio)
+    controller.set_diarize_speakers(config.diarize_speakers)
+    controller.set_hf_token(config.hf_token)
 
     root = tk.Tk()
     create_app(

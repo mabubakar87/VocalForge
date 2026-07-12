@@ -2,8 +2,8 @@
 
 - **Capability id:** `diarization`
 - **Author / date:** Phase 4 evaluation — 2026-07-12
-- **Decision:** Recommended **Approve with conditions** (awaiting explicit sign-off before implementation spike)
-- **Candidate engines:** **PyAnnote** (`pyannote.audio` + gated HF pipelines) primary; WhisperX diarization as optional wrapper (still PyAnnote under the hood)
+- **Decision:** **Approved** (P4-020 implementation on `phase-4-diarization`)
+- **Candidate engines:** **PyAnnote community-1** (`pyannote/speaker-diarization-community-1`) primary; WhisperX deferred
 
 ## 1. User workflow
 
@@ -11,125 +11,67 @@
 
 **Success in UI:**
 
-1. Optional home toggle: **Diarize speakers** (default **Off**), only enabled when the extra is Ready.
-2. When On: after optional Enhance, run diarization, then Faster-Whisper ASR, then merge speaker labels onto timed segments.
+1. Optional home toggle: **Diarize** (default **Off**), only enabled when the extra is Ready.
+2. When On: after optional Enhance, run diarization (CUDA if available, else CPU), then Faster-Whisper ASR, then merge speaker labels onto timed segments.
 3. Transcript display (and saved `.txt`) uses lines like:
    ```
    [SPEAKER_00 0:00–0:04] Hello, thanks for joining.
    [SPEAKER_01 0:04–0:09] Happy to be here.
    ```
-4. Setup shows status: Not installed / Needs HF token / Ready (cached) / Error.
-5. Missing extra or missing token → toggle Off; base single-speaker ASR unchanged.
+4. Setup shows Ready when `pyannote.audio` imports **and** weights are vendored under `Models/diarization/`.
+5. Missing extra, missing vendor, or diarization failure → unlabeled ASR continues (no crash).
 
-**Why this track next:** Highest workflow impact after enhancement; forces the HF auth/compliance design early; fits the pipeline  
-`Enhance → Diarize → ASR` and defines speaker×time data shapes before alignment work.
+## 2. Implementation (P4-020)
 
-## 2. Benchmarks
+| Piece | Location |
+|-------|----------|
+| Pipeline wrapper | `vocalforge/diarization.py` — offline local `config.yaml` load |
+| Vendor (one-time) | `scripts/vendor_diarization_models.py` → `Models/diarization/pyannote_community_1/` |
+| Merge | `vocalforge/merge.py` — `assign_speakers()` / word-level group |
+| Job path | `vocalforge/jobs.py` — enhance → diarize (try/except) → ASR → merge |
+| Config | `config.hf_token` (vendor download only), `config.diarize_speakers` |
+| Extras probe | Ready iff pyannote importable **and** local weights vendored |
+| Smoke | `scripts/smoke_test_diarization.py` |
 
-**Method (spike, before READY):**
-
-| Fixture | Purpose |
-|---------|---------|
-| Single-speaker clean dictation | Expect one dominant speaker; no crash |
-| Two-speaker interview (or synthetic A/B turns) | Expect ≥2 speaker labels; turns roughly match turns |
-| Overlapping speech (if available) | Document failure modes (pyannote is imperfect on overlap) |
-| Same clip with Enhance On vs Off | Confirm enhance→diarize chain does not break |
-
-**Metrics:**
-
-- Wall time: diarize-only and enhance+diarize+transcribe
-- Peak RSS / VRAM with ASR unloaded vs co-resident
-- Speaker count vs ground truth (manual for spike)
-- Qualitative: label stability (SPEAKER_00 vs flip-flop)
-
-**Baseline:** Current path = optional Enhance + Faster-Whisper (no speakers).
+**Pipeline id:** `pyannote/speaker-diarization-community-1` (vendored offline)  
+**VRAM rule:** prefer CUDA when `torch.cuda.is_available()`; unload Whisper briefly on small GPUs, then ASR (CTranslate2).  
+**Offline rule:** runtime sets `HF_HUB_OFFLINE=1` only while loading the local pipeline; no Hub HEAD checks per job.
 
 ## 3. Dependencies and licensing
 
 | Piece | License / notes |
 |-------|------------------|
-| `pyannote.audio` ≥ 3.1 | Open-source package |
-| `pyannote/speaker-diarization-3.1` | Model card **MIT**, but **gated** on Hugging Face (must accept user conditions / share contact info) |
-| `pyannote/segmentation-3.0` | Also **gated** — must accept separately |
-| PyTorch | Required (same packaging concern as rejected for enhancement v1 — keep out of **base** `requirements.txt`) |
-| WhisperX | Optional; diarization still uses PyAnnote + HF token. Prefer **not** pulling WhisperX for v1 diarization to avoid duplicating ASR |
+| `pyannote.audio` ≥ 3.1 | Open-source package (`requirements-extras.txt` Diarization Extra) |
+| `pyannote/speaker-diarization-community-1` | Gated on Hugging Face — accept terms + read token |
+| PyTorch | Install per machine (CPU wheel recommended for 4 GB VRAM hosts); **not** in base `requirements.txt` |
 
-**Auth (non-negotiable for first download):**
+**Auth:**
 
-1. User creates a Hugging Face account.
-2. Accept conditions on **both** gated repos (diarization + segmentation).
-3. Create a read token with access to public gated repos.
-4. Supply token once via Setup (stored as `hf_token` in local `config.json` — gitignored — or `HF_TOKEN` env). Never ship a token in the repo.
+1. Hugging Face account + accept gated model conditions (one-time vendor only).
+2. Run `PYTHONPATH=. python scripts/vendor_diarization_models.py` (uses `HF_TOKEN` / Setup token if hub cache empty).
+3. Runtime never needs the network for diarization after weights are under `Models/`.
 
-**Offline after first success:** Models live in HF/pyannote cache; subsequent runs can use `HF_HUB_OFFLINE=1`. First-run **requires** network + accepted gates.  
-**Do not** claim a universal no-login install.
+## 4. Hardware notes
 
-**Alternative community pipeline:** `pyannote/speaker-diarization-community-1` (CC-BY-4.0) — still gated for download; evaluate in spike if 3.1 UX is too painful, but keep one primary pin.
+| Machine | Notes |
+|---------|-------|
+| Dev laptop (RTX 3050 4 GB) | Prefer CPU diarize so Whisper keeps CUDA; serialize load/unload |
+| CPU-only | Supported; slower RTF |
 
-## 4. Hardware measurements
-
-| Machine | RAM peak | VRAM peak | Disk for models | Notes |
-|---------|----------|-----------|-----------------|-------|
-| Dev laptop (RTX 3050 4 GB, 32 GB RAM) | *TBD at spike* | *TBD — prefer diarize then ASR, not both on GPU* | PyAnnote pipeline + embeddings often **hundreds of MB–~1+ GB** | 4 GB VRAM + `large-v3-turbo` is contested; **serialize** load/unload |
-| CPU-only | *TBD* | 0 | Same | Must work, expect slower RTF |
+Fill RAM/VRAM peaks after a real two-speaker smoke run.
 
 ## 5. Packaging
 
-- Base: unchanged (`requirements.txt` — Faster-Whisper / CTranslate2 only).
-- Extras subgroup in `requirements-extras.txt` (commented until Approved):
-  - `torch` / `torchaudio` (CPU default; CUDA optional doc)
-  - `pyannote.audio>=3.1,<4`
-- Probe: import `pyannote.audio` **and** valid token / cached pipeline → Ready; import without token → Needs setup.
-- Failure modes: clear Setup errors for “gates not accepted”, “invalid token”, “offline without cache”.
+- Base: unchanged.
+- Extras: see `# Diarization Extra` in `requirements-extras.txt`.
+- Probe: import + token/cache → Ready; otherwise Not installed.
 
-**Engine choice for VocalForge:** **Standalone PyAnnote** after our existing Faster-Whisper path — not a full WhisperX swap. WhisperX remains a future option if we later want bundled align+diarize.
+## 6. Recommendation / sign-off
 
-## 6. Local model acquisition
-
-- First run: `Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=...)` downloads into HF cache.
-- Disk-space check before download (Phase 2 pattern).
-- Document exact cache dirs after spike (`~/.cache/huggingface`, `~/.cache/torch/pyannote`, etc.).
-- Optional advanced: vendor local `config.yaml` + weights for air-gapped (document only; not required for v1).
-
-## 7. Resource interaction with ASR
-
-**Recommended intermediate shapes** (design now, implement in spike):
-
-```text
-SpeakerTurn { start: float, end: float, speaker: str }
-TranscriptSegment { start, end, text, speaker?: str }
-```
-
-**Pipeline order:**
-
-1. Optional `enhance_wav` (existing)
-2. Optional `diarize_wav` → `list[SpeakerTurn]`
-3. Faster-Whisper `transcribe` with segment timestamps (enable timestamps when diarize is On)
-4. `assign_speakers(segments, turns)` by time overlap → labeled transcript
-
-**Resource rules:**
-
-- Do **not** keep PyAnnote + large Whisper on 4 GB VRAM together by default.
-- Prefer: diarize (GPU or CPU) → release pipeline → ASR (existing CTranslate2 device).
-- Aligns with plan §7 serialize load/unload; worker process if in-process RSS fights.
-
-## 8. Recommendation
-
-**Approve with conditions:**
-
-1. Ship diarization as an **optional extra** (default Off); base install untouched.
-2. **Auth UX first** in the spike: Setup fields for HF token + checklist link to accept both gated models; status machine: Not installed → Needs HF setup → Ready.
-3. Use **PyAnnote standalone** + merge-onto-Faster-Whisper segments; defer WhisperX as the primary engine.
-4. Measure on the 3050 laptop; force serialized GPU use if needed.
-5. Mark Setup `ready` only after: token+cache works offline once, two-speaker fixture labeled sanely, and enhance→diarize→ASR chain works.
-
-**Reject / defer if:** token/gates UX is unacceptable for the product promise, or 4 GB hardware cannot run diarize with acceptable latency even on CPU.
-
----
+**Approved** for optional extra (default Off). Baseline single-speaker ASR must keep working when diarization is Off, missing, or fails.
 
 ### Sign-off
 
-- [ ] Product / owner approves conditions above
-- [ ] Bounded P4-020 implementation spike opened (auth + diarize + merge; no full UI unlock until metrics)
+- [x] Bounded P4-020 implementation (auth + diarize + merge + UI toggle)
 - [ ] Hardware table filled from real measurements
-- [ ] Decision updated to **Approved** or **Rejected**
+- [x] Decision updated to **Approved**

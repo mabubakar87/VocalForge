@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -35,6 +35,8 @@ class TranscriptionResult:
     formatted_text: str
     device: str
     model_name: str
+    segments: list[dict[str, Any]] = field(default_factory=list)
+    words: list[dict[str, Any]] = field(default_factory=list)
 
 
 class TranscriptionService:
@@ -155,8 +157,9 @@ class TranscriptionService:
             # Slightly less conservative than library default (2000ms) for short dictation.
             kwargs["vad_parameters"] = {"min_silence_duration_ms": 500}
         logger.info(
-            "Transcribing %s (vad_filter=%s, language=%s, beam_size=%s, word_timestamps=%s).",
+            "Transcribing %s (task=%s, vad_filter=%s, language=%s, beam_size=%s, word_timestamps=%s).",
             file_path,
+            self.task,
             self.vad_filter,
             self.language or "auto",
             self.beam_size,
@@ -165,19 +168,29 @@ class TranscriptionService:
         segments, info = self._model.transcribe(str(file_path), **kwargs)
         duration = float(getattr(info, "duration", 0.0) or 0.0) if info is not None else 0.0
         pieces: list[str] = []
+        timed_segments: list[dict[str, Any]] = []
+        timed_words: list[dict[str, Any]] = []
         for segment in segments:
             if cancel_event is not None and cancel_event.is_set():
                 raise TranscriptionCancelled()
             raw = (getattr(segment, "text", "") or "").strip()
+            start = float(getattr(segment, "start", 0.0) or 0.0)
+            end = float(getattr(segment, "end", start) or start)
+            if raw:
+                timed_segments.append({"start": start, "end": end, "text": raw})
+            for word in getattr(segment, "words", None) or []:
+                w_text = (getattr(word, "word", None) or getattr(word, "text", None) or "").strip()
+                if not w_text:
+                    continue
+                w_start = float(getattr(word, "start", start) or start)
+                w_end = float(getattr(word, "end", w_start) or w_start)
+                timed_words.append({"start": w_start, "end": w_end, "word": w_text})
             if self.word_timestamps:
-                start = float(getattr(segment, "start", 0.0) or 0.0)
-                end = float(getattr(segment, "end", start) or start)
                 if raw:
                     pieces.append(f"[{format_timestamp(start)}–{format_timestamp(end)}] {raw}")
             elif raw:
                 pieces.append(raw)
             if progress_callback is not None and duration > 0:
-                end = float(getattr(segment, "end", 0.0) or 0.0)
                 progress_callback(min(1.0, max(0.0, end / duration)))
 
         if progress_callback is not None:
@@ -190,6 +203,8 @@ class TranscriptionService:
             formatted_text=formatted,
             device=self.device,
             model_name=self._model_name,
+            segments=timed_segments,
+            words=timed_words,
         )
 
     def release(self) -> None:

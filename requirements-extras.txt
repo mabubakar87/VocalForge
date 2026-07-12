@@ -3,22 +3,44 @@
 #
 # Base runtime remains: pip install -r requirements.txt
 #
-# --- enhancement (P4-030 / P4-060 spike) ---
+# --- enhancement (P4-030) ---
 # Prefer the Rust deep-filter binary (no PyTorch):
 #   https://github.com/Rikorose/DeepFilterNet/releases (v0.5.6 linux musl)
 #   Place as .deps/deep-filter (or set DEEP_FILTER_BIN / PATH)
 # Resampling for 16 kHz ↔ 48 kHz:
 soxr>=0.3.0,<1
 #
-# Optional Python/torch path (NOT used by the current spike):
+# Optional Python/torch path (NOT used by the enhancement CLI path):
 # torch / torchaudio  # install from pytorch.org
 # deepfilternet>=0.5.6,<0.6
 #
+# --- Diarization Extra (P4-020) ---
+# Requires a Hugging Face account, acceptance of gated model conditions, and a
+# read token (HF_TOKEN / config.hf_token). See docs/proposals/diarization.md.
+#
+# Install torch for your machine first.
+# CPU-only (slow diarization on long files):
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+# CUDA 12.x (recommended for GPU diarization on RTX 3050 / driver 570):
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+# VocalForge prefers CUDA for diarization when torch.cuda.is_available(); it
+# temporarily unloads Faster-Whisper so 4 GB VRAM is free for pyannote.
+# Note: Faster-Whisper can already use GPU via CTranslate2 even with CPU torch —
+# pyannote cannot; it needs a CUDA torch build.
+#
+# Then:
+pyannote.audio>=3.1.0,<5
+# Note: VocalForge preloads WAVs into memory so torchcodec is not required.
+# A torchcodec UserWarning on import is harmless and can be ignored.
+#
+# Offline runtime (required for Diarize Ready):
+#   PYTHONPATH=. python scripts/vendor_diarization_models.py
+# Copies community-1 into Models/diarization/pyannote_community_1/ (gitignored
+# under Models/). Runtime loads local config.yaml with HF_HUB_OFFLINE=1 — no
+# Hugging Face HEAD checks on each job.
+#
 # --- alignment / whisperx stack (placeholder) ---
 # whisperx>=3.1,<4
-#
-# --- diarization (placeholder; may require Hugging Face token) ---
-# pyannote.audio>=3.1,<4
 #
 # --- separation (placeholder) ---
 # demucs>=4.0,<5
