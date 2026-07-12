@@ -42,6 +42,13 @@ def recorded_audio_path(paths: AppPaths) -> Path:
     return paths.audio / "recorded_audio.wav"
 
 
+def enhanced_audio_path(paths: AppPaths, source: Path | None = None) -> Path:
+    """Path for DeepFilterNet output (keeps the original recording intact)."""
+    if source is None:
+        return paths.audio / "recorded_audio_enhanced.wav"
+    return paths.audio / f"{Path(source).stem}_enhanced.wav"
+
+
 def next_transcript_path(paths: AppPaths, when: datetime | None = None) -> Path:
     """Return a transcript path. If the second collides, add a numeric suffix."""
     when = when or datetime.now()

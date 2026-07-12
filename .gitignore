@@ -21,6 +21,9 @@ config.json
 # Audio files
 audio_files/
 
+# Enhancement spike outputs (regenerate via scripts/spike_enhancement_bench.py)
+tests/fixtures/enhancement/out/
+
 # Bytecode
 __pycache__/
 *.py[cod]

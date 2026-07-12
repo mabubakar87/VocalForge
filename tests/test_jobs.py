@@ -73,6 +73,15 @@ def test_rejects_unsupported_upload(tmp_path: Path):
     assert any(e.type is EventType.JOB_FAILED for e in events)
 
 
+def test_enhance_audio_flag_defaults_off(tmp_path: Path):
+    paths = default_paths(tmp_path)
+    service = TranscriptionService(paths.models, device="cpu", model_factory=lambda *a, **k: FakeModel())
+    controller = JobController(paths, service, emit=lambda e: None)
+    assert controller.enhance_audio is False
+    controller.set_enhance_audio(True)
+    assert controller.enhance_audio is True
+
+
 def test_cancel_during_transcription(tmp_path: Path):
     events: list[JobEvent] = []
 

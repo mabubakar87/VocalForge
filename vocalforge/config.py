@@ -27,6 +27,7 @@ class AppConfig:
     vad_filter: bool = True  # Faster-Whisper Silero VAD; strips long silence
     beam_size: int = 5  # Faster-Whisper decode beam (1=fast, 5=default, 10=careful)
     word_timestamps: bool = False  # Segment timestamps in transcript when enabled
+    enhance_audio: bool = False  # DeepFilterNet pre-ASR denoise (optional extra)
 
 
 def default_config() -> AppConfig:

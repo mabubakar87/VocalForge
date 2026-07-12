@@ -12,9 +12,10 @@ from typing import Any, Callable, Optional
 
 from vocalforge.audio import AudioRecorder, resolve_input_device_index, save_wav
 from vocalforge.clipboard import ClipboardSettings, deliver_text
+from vocalforge.enhancement import EnhancementError, enhance_wav, is_enhancement_available
 from vocalforge.media import is_supported_upload
 from vocalforge.state import AppState, StateMachine
-from vocalforge.storage import AppPaths, recorded_audio_path, save_transcript
+from vocalforge.storage import AppPaths, enhanced_audio_path, recorded_audio_path, save_transcript
 from vocalforge.transcription import TranscriptionCancelled, TranscriptionService
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,10 @@ class JobController:
         self._active_job_id: Optional[str] = None
         self._stop_recording = threading.Event()
         self._cancel_transcription = threading.Event()
+        self.enhance_audio: bool = False
+
+    def set_enhance_audio(self, enabled: bool) -> None:
+        self.enhance_audio = bool(enabled)
 
     def _set_state(self, target: AppState, job_id: str | None = None) -> bool:
         if not self.state.try_transition(target):
@@ -276,6 +281,51 @@ class JobController:
             if self.state.state is AppState.RECORDING:
                 self._set_state(AppState.TRANSCRIBING, job_id=job_id)
 
+            audio_path = Path(file_path)
+            if self.enhance_audio:
+                if not is_enhancement_available():
+                    logger.warning("Enhance audio is on but deep-filter/soxr is unavailable; using original.")
+                elif audio_path.suffix.lower() != ".wav":
+                    logger.warning(
+                        "Enhance audio skips non-WAV upload (%s); transcribing original.",
+                        audio_path.suffix,
+                    )
+                else:
+                    self.emit(
+                        JobEvent(
+                            EventType.STATUS,
+                            job_id=job_id,
+                            payload={"text": "Enhancing…"},
+                        )
+                    )
+                    try:
+                        enhanced = enhance_wav(
+                            audio_path,
+                            enhanced_audio_path(self.paths, audio_path),
+                        )
+                        audio_path = enhanced.output_path
+                    except EnhancementError as exc:
+                        logger.warning("Enhancement failed (%s); using original audio.", exc)
+                        self.emit(
+                            JobEvent(
+                                EventType.STATUS,
+                                job_id=job_id,
+                                payload={"text": "Enhancement failed — transcribing original…"},
+                            )
+                        )
+
+            if self._cancel_transcription.is_set():
+                if self._is_current(job_id):
+                    self._set_state(AppState.READY, job_id=job_id)
+                    self.emit(
+                        JobEvent(
+                            EventType.TRANSCRIPTION_CANCELLED,
+                            job_id=job_id,
+                            payload={"message": "Transcription cancelled."},
+                        )
+                    )
+                return
+
             def on_progress(fraction: float) -> None:
                 if not self._is_current(job_id):
                     return
@@ -296,7 +346,7 @@ class JobController:
                 )
 
             result = self.transcription.transcribe(
-                file_path,
+                audio_path,
                 cancel_event=self._cancel_transcription,
                 progress_callback=on_progress,
             )
