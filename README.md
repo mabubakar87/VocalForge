@@ -17,62 +17,57 @@ VocalForge is a Python-based application designed for real-time audio recording,
 
 ## Requirements
 
-- Python 3.8 or higher
-- Libraries:
-  - `tkinter`
-  - `sounddevice`
-  - `numpy`
-  - `queue`
-  - `threading`
-  - `faster-whisper`
-  - `pyautogui`
-  - `pyperclip`
-  - `wave`
-  - `re`
-  - `subprocess`
-  - `os`
-  - `sys`
-  - `logging`
-  - `datetime`
-  - `requests`
-  - `keyboard` (for global hotkey support)
-  
+- Python **3.10+** (verified on 3.11)
+- System packages: Tkinter, PortAudio (see `docs/runtime_requirements.md`)
+- Python packages: see `requirements.txt`
+
 ## Installation
 
-1. **Clone the Repository**:  
+1. **Clone the Repository**:
    ```bash
    git clone https://github.com/mabubakar87/VocalForge.git
-   cd VocalForge```
-   
-2. **Create and Activate a Virtual Environment**:  
+   cd VocalForge
+   ```
 
-   **Windows**:  
+2. **Create and Activate a Virtual Environment**:
+
+   **Windows**:
    ```bash
    python -m venv venv
    venv\Scripts\activate
    ```
 
-   **macOS/Linux**:  
+   **macOS/Linux**:
    ```bash
    python3 -m venv venv
    source venv/bin/activate
    ```
 
-3. **Upgrade pip and Install Dependencies**:  
+3. **Install Dependencies**:
    ```bash
    pip install --upgrade pip
    pip install -r requirements.txt
    ```
 
-4. **Run the Application**:  
+   For development/tests:
+   ```bash
+   pip install -r requirements-dev.txt
+   ```
+
+4. **Run the Application**:
    ```bash
    python main.py
    ```
 
-5. **Deactivate the Virtual Environment (After Use)**:  
+   On this project's Linux development machine you may use `./run.sh` as a
+   convenience launcher for local PortAudio/CUDA library paths.
+
+5. **Deactivate the Virtual Environment (After Use)**:
    ```bash
    deactivate
    ```
+
+See `docs/runtime_requirements.md` for PortAudio and CUDA details.
 
 ---
 

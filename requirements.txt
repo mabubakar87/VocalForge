@@ -1,9 +1,10 @@
-sounddevice
-numpy
-faster-whisper
-pyautogui
-pyperclip
-wave
-requests
-tqdm
-keyboard
+# Runtime dependencies for VocalForge
+# Supported Python: 3.10+ (developed and verified on 3.11)
+
+sounddevice>=0.5.0,<0.6
+numpy>=1.24,<3
+faster-whisper>=1.0.3,<2
+pyautogui>=0.9.54,<1
+pyperclip>=1.8,<2
+requests>=2.31,<3
+keyboard>=0.13.5,<0.14

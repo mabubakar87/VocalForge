@@ -1,0 +1,86 @@
+"""Application entry helpers."""
+
+from __future__ import annotations
+
+import logging
+import threading
+import tkinter as tk
+
+from vocalforge.capabilities import evaluate_capabilities
+from vocalforge.clipboard import ClipboardSettings
+from vocalforge.config import load_config, save_config
+from vocalforge.jobs import JobController
+from vocalforge.storage import default_paths
+from vocalforge.transcription import TranscriptionService
+from vocalforge.ui import create_app
+
+MODELS = [
+    "",
+    "distil-small.en (151 MB)",
+    "distil-medium.en (1.42 GB)",
+    "large-v3-turbo (3.1 GB)",
+]
+
+
+def configure_logging(log_file) -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(),
+        ],
+        force=True,
+    )
+
+
+def try_start_hotkey(controller: JobController) -> None:
+    """Best-effort global hotkey. Never fatal; Linux often requires elevated privileges."""
+
+    def listener() -> None:
+        try:
+            import keyboard
+
+            keyboard.add_hotkey("ctrl+q", controller.toggle_recording)
+            keyboard.wait()
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(
+                "Global hotkey unavailable (use the record button instead): %s",
+                exc,
+            )
+
+    threading.Thread(target=listener, daemon=True).start()
+
+
+def run() -> None:
+    paths = default_paths()
+    configure_logging(paths.log_file)
+    logging.info("Application started.")
+
+    capabilities = evaluate_capabilities()
+    logging.info(
+        "Using device: %s%s",
+        capabilities.selected_device,
+        f" ({capabilities.fallback_reason})" if capabilities.fallback_reason else "",
+    )
+
+    config_path = paths.root / "config.json"
+    config = load_config(config_path)
+    save_config(config_path, config)
+
+    transcription = TranscriptionService(
+        download_root=paths.models,
+        device=capabilities.selected_device,
+        compute_type="int8" if capabilities.selected_device == "cpu" else "default",
+    )
+    controller = JobController(
+        paths=paths,
+        transcription=transcription,
+        emit=lambda _event: None,
+        clipboard_settings=ClipboardSettings(auto_paste=config.auto_paste),
+    )
+
+    root = tk.Tk()
+    create_app(root, controller, config, config_path, MODELS)
+    try_start_hotkey(controller)
+    root.mainloop()
