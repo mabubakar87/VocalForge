@@ -8,3 +8,6 @@ pyautogui>=0.9.54,<1
 pyperclip>=1.8,<2
 requests>=2.31,<3
 keyboard>=0.13.5,<0.14
+arabic-reshaper>=3.0,<4
+python-bidi>=0.4.2,<0.7
+Pillow>=10.0,<12

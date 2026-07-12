@@ -19,5 +19,9 @@ config.json
 # Audio files
 audio_files/
 
-# Plan
+# Bytecode
+__pycache__/
+*.py[cod]
+
+# Plan (local working docs; shipped summary is docs/phase_2.md)
 plan/

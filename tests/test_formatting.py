@@ -1,4 +1,8 @@
-from vocalforge.formatting import format_text
+from vocalforge.formatting import (
+    contains_arabic_script,
+    format_text,
+    prepare_ui_text,
+)
 
 
 def test_format_text_empty():
@@ -21,3 +25,18 @@ def test_format_text_sentence_capitals():
 
 def test_format_text_unicode():
     assert format_text("café is nice") == "Café is nice"
+
+
+def test_format_text_preserves_urdu():
+    urdu = "دیکھتے ہیں اردو میں ایک ایسا کام کرتا ہے"
+    assert format_text(urdu) == urdu
+    assert contains_arabic_script(urdu) is True
+
+
+def test_prepare_ui_text_shapes_urdu():
+    urdu = "دیکھتے ہیں اردو میں ایک ایسا کام کرتا ہے"
+    shaped = prepare_ui_text(urdu)
+    assert shaped != urdu
+    assert "د" in shaped or "ﺩ" in shaped or "ﺪ" in shaped
+    assert prepare_ui_text("Hello world") == "Hello world"
+

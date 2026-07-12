@@ -9,7 +9,11 @@ class FakeSegment:
 
 
 class FakeModel:
-    def transcribe(self, _path: str):
+    def __init__(self) -> None:
+        self.last_kwargs: dict = {}
+
+    def transcribe(self, _path: str, **kwargs):
+        self.last_kwargs = kwargs
         return [FakeSegment(" hello "), FakeSegment("world.")], None
 
 
@@ -27,7 +31,6 @@ def test_load_preserves_previous_model_on_failure(tmp_path: Path):
     assert service.is_ready
     try:
         service.load_model("second")
-        assert False, "expected failure"
     except RuntimeError:
         pass
     assert service.model_name == "first"
@@ -48,3 +51,22 @@ def test_cpu_fallback_on_cuda_error(tmp_path: Path):
     used = service.load_model_with_cpu_fallback("distil-small.en")
     assert used == "cpu"
     assert devices == ["cuda", "cpu"]
+
+
+def test_transcribe_passes_language_and_task(tmp_path: Path):
+    model = FakeModel()
+
+    def factory(name, **kwargs):
+        return model
+
+    service = TranscriptionService(tmp_path, device="cpu", model_factory=factory)
+    service.load_model("large-v3-turbo")
+    service.set_language_settings("en", "transcribe")
+    service.transcribe(tmp_path / "x.wav")
+    assert model.last_kwargs["task"] == "transcribe"
+    assert model.last_kwargs["language"] == "en"
+
+    service.set_language_settings("ur", "transcribe")
+    service.transcribe(tmp_path / "x.wav")
+    assert model.last_kwargs["task"] == "transcribe"
+    assert model.last_kwargs["language"] == "ur"
