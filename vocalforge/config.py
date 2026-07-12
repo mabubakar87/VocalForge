@@ -21,13 +21,15 @@ class AppConfig:
     active_profile: str = ""
     preferred_device: str = ""  # "", "cpu", or "cuda"
     language: str | None = None  # Whisper language code; None = auto-detect
-    task: str = "transcribe"  # always "transcribe" (legacy "translate" is migrated away)
+    task: str = "transcribe"  # "transcribe" or "translate" (to English)
     auto_paste: bool = False
     input_device: str | None = None
     vad_filter: bool = True  # Faster-Whisper Silero VAD; strips long silence
     beam_size: int = 5  # Faster-Whisper decode beam (1=fast, 5=default, 10=careful)
     word_timestamps: bool = False  # Segment timestamps in transcript when enabled
     enhance_audio: bool = False  # DeepFilterNet pre-ASR denoise (optional extra)
+    diarize_speakers: bool = False  # PyAnnote speaker labels (optional extra)
+    hf_token: str | None = None  # Hugging Face read token for gated pyannote models
 
 
 def default_config() -> AppConfig:

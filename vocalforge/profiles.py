@@ -27,6 +27,8 @@ class ProfileSpec:
     cache_dirname: str
     description: str
     english_only: bool = False
+    # Whisper task=translate → English. large-v3-turbo was not trained for this.
+    supports_translate: bool = False
     # Hugging Face may redirect model ids; keep known local cache folder aliases.
     cache_dirnames: tuple[str, ...] = ()
 
@@ -44,6 +46,7 @@ PROFILES: dict[str, ProfileSpec] = {
         cache_dirname="models--Systran--faster-distil-whisper-small.en",
         description="Fast CPU transcription with a small English model.",
         english_only=True,
+        supports_translate=False,
     ),
     "balanced": ProfileSpec(
         id="balanced",
@@ -57,6 +60,7 @@ PROFILES: dict[str, ProfileSpec] = {
         cache_dirname="models--Systran--faster-distil-whisper-medium.en",
         description="Good accuracy on CUDA when available; CPU fallback supported.",
         english_only=True,
+        supports_translate=False,
     ),
     "high_accuracy": ProfileSpec(
         id="high_accuracy",
@@ -69,18 +73,62 @@ PROFILES: dict[str, ProfileSpec] = {
         size_label="~1.6 GB",
         # faster-whisper resolves large-v3-turbo to mobiuslabsgmbh (HF may redirect further).
         cache_dirname="models--mobiuslabsgmbh--faster-whisper-large-v3-turbo",
-        description="Highest quality Faster-Whisper model in this release.",
+        description=(
+            "Fast multilingual ASR (large-v3-turbo). Does not support "
+            "speech→English translate — turbo omitted translation training data."
+        ),
         english_only=False,
+        supports_translate=False,
         cache_dirnames=(
             "models--Systran--faster-whisper-large-v3-turbo",
             "models--dropbox-dash--faster-whisper-large-v3-turbo",
         ),
     ),
+    "multilingual_small": ProfileSpec(
+        id="multilingual_small",
+        label="Multilingual Small",
+        model="small",
+        preferred_device="cuda",
+        compute_type_cuda="float16",
+        compute_type_cpu="int8",
+        approx_size_bytes=480 * 1024 * 1024,
+        size_label="~480 MB",
+        cache_dirname="models--Systran--faster-whisper-small",
+        description=(
+            "Systran/faster-whisper-small — multilingual ASR plus full "
+            "speech→English translation. Recommended when Translate is needed."
+        ),
+        english_only=False,
+        supports_translate=True,
+    ),
+    "multilingual_medium": ProfileSpec(
+        id="multilingual_medium",
+        label="Multilingual Medium",
+        model="medium",
+        preferred_device="cuda",
+        compute_type_cuda="float16",
+        compute_type_cpu="int8",
+        approx_size_bytes=1500 * 1024 * 1024,
+        size_label="~1.5 GB",
+        cache_dirname="models--Systran--faster-whisper-medium",
+        description=(
+            "Systran/faster-whisper-medium — stronger multilingual ASR and "
+            "speech→English translation than Small; heavier VRAM/disk."
+        ),
+        english_only=False,
+        supports_translate=True,
+    ),
 }
 
-PROFILE_ORDER = ("lightweight", "balanced", "high_accuracy")
+PROFILE_ORDER = (
+    "lightweight",  # ~160 MB
+    "multilingual_small",  # ~480 MB
+    "balanced",  # ~800 MB
+    "multilingual_medium",  # ~1.5 GB
+    "high_accuracy",  # ~1.6 GB
+)
 
-# High Accuracy language modes: (id, label, whisper_language|None, task)
+# Multilingual language modes: (id, label, whisper_language|None, default task)
 LANGUAGE_OPTIONS: tuple[tuple[str, str, str | None, str], ...] = (
     ("auto", "Auto-detect", None, "transcribe"),
     ("en", "English", "en", "transcribe"),
@@ -234,11 +282,9 @@ def parse_model_name(display: str) -> str:
     return display.split(" (")[0].strip() if display else ""
 
 
-def language_mode_from_config(language: str | None, task: str) -> str:
-    """Map saved language/task settings to a LANGUAGE_OPTIONS id."""
-    # Obsolete "translate" task maps to English (works better on large-v3-turbo).
-    if (task or "").lower() == "translate":
-        return "en"
+def language_mode_from_config(language: str | None, task: str = "transcribe") -> str:
+    """Map saved language to a LANGUAGE_OPTIONS id (task is independent)."""
+    del task  # Translate-to-English is a separate control; do not remap language.
     if language:
         code = language.lower()
         if code in LANGUAGE_OPTION_BY_ID:
@@ -247,7 +293,10 @@ def language_mode_from_config(language: str | None, task: str) -> str:
 
 
 def language_settings_for_mode(mode_id: str) -> tuple[str | None, str]:
-    """Return (whisper_language, task) for a High Accuracy language mode id."""
+    """Return (whisper_language, task) for a High Accuracy language mode id.
+
+    Mode entries always use task=transcribe; overlay translate from config/UI.
+    """
     option = LANGUAGE_OPTION_BY_ID.get(mode_id) or LANGUAGE_OPTION_BY_ID["auto"]
     return option[2], option[3]
 
@@ -261,10 +310,13 @@ def resolve_language_settings(
     """Effective language/task for a profile (English-only models are locked)."""
     if profile.english_only:
         return "en", "transcribe"
-    # Migrate obsolete translate task to forced English transcription.
-    if (task or "").lower() == "translate":
-        return "en", "transcribe"
-    return language, "transcribe"
+    normalized = (task or "transcribe").lower()
+    if normalized not in {"transcribe", "translate"}:
+        normalized = "transcribe"
+    # large-v3-turbo accepts task=translate but was not trained for it — force off.
+    if normalized == "translate" and not profile.supports_translate:
+        return language, "transcribe"
+    return language, normalized
 
 
 def language_option_label(mode_id: str) -> str:

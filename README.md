@@ -1,139 +1,113 @@
 # VocalForge
 
-VocalForge is a Python-based application designed for real-time audio recording, transcription, and text formatting. It leverages the **Faster Whisper** model for accurate and fast transcription, and provides a user-friendly GUI built with **Tkinter**. The application supports both live audio recording and uploading of pre-recorded audio files for transcription. The transcribed text is automatically formatted and copied to the clipboard for easy use.
+Desktop speech-to-text app built with **Tkinter** and **Faster-Whisper**. Record from the mic or upload audio, transcribe locally, and copy formatted text to the clipboard. Optional Phase 4 extras add enhancement and speaker diarization without changing the base install.
+
+Launch on this Linux laptop with `./run.sh` (PortAudio + CUDA library paths). Elsewhere: `python main.py` inside the venv.
 
 ## Features
 
-- **Real-Time Audio Recording**: Record audio directly from your microphone.
-- **Audio Transcription**: Transcribe recorded or uploaded audio files using the Faster Whisper model.
-- **Text Formatting**: Automatically format transcribed text for better readability (e.g., capitalization, punctuation spacing).
-- **Clipboard Integration**: Copy the transcribed text to the clipboard for easy pasting into other applications.
-- **Upload Audio Files**: Transcribe pre-recorded `.wav` files.
-- **Model Selection**: Choose from multiple Whisper models (e.g., `distil-small.en`, `large-v3-turbo`) via a dropdown menu.
-- **Custom Models Folder**: Models are stored locally in a `Models` folder next to the application for easy access and portability.
-- **CUDA Support**: Utilize GPU acceleration (if available) for faster transcription.
-- **Auto-Hiding Scrollbar**: The scrollbar in the text area hides when not needed, providing a cleaner UI.
-- **Logging**: Detailed logging for debugging and tracking application activity.
+- **Hardware profiles** (Setup): Lightweight → High Accuracy, sized smallest to largest
+- **Multilingual Small / Medium**: full Whisper **speech→English translate** (`task=translate`)
+- **High Accuracy (`large-v3-turbo`)**: fast multilingual ASR — **not** trained for translate
+- **Home session controls**: Processing (CPU/GPU), Language, VAD, beam, timestamps, Enhance, Diarize, Translate
+- **Optional extras**: DeepFilterNet enhance; offline PyAnnote speaker diarization
+- Multi-format upload, cancel, history, clipboard delivery
+
+## Profiles (Setup)
+
+| Profile | Model | Approx. size | Translate → English |
+|---------|--------|--------------|---------------------|
+| Lightweight | `distil-small.en` | ~160 MB | No (English-only) |
+| Multilingual Small | `small` | ~480 MB | **Yes** (recommended for translate) |
+| Balanced | `distil-medium.en` | ~800 MB | No (English-only) |
+| Multilingual Medium | `medium` | ~1.5 GB | **Yes** |
+| High Accuracy | `large-v3-turbo` | ~1.6 GB | **No** (turbo) |
+
+Models live under `Models/` (gitignored). First download needs network.
 
 ## Requirements
 
 - Python **3.10+** (verified on 3.11)
-- System packages: Tkinter, PortAudio (see `docs/runtime_requirements.md`)
-- Python packages: see `requirements.txt`
+- System: Tkinter, PortAudio — see `docs/runtime_requirements.md`
+- Base Python packages: `requirements.txt`
+- Optional extras: `requirements-extras.txt` (do **not** mix into base until you need them)
 
 ## Installation
 
-1. **Clone the Repository**:
-   ```bash
-   git clone https://github.com/mabubakar87/VocalForge.git
-   cd VocalForge
-   ```
+```bash
+git clone https://github.com/mabubakar87/VocalForge.git
+cd VocalForge
+python3.11 -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -U pip
+pip install -r requirements.txt
+./run.sh                   # or: python main.py
+```
 
-2. **Create and Activate a Virtual Environment**:
+Dev/tests: `pip install -r requirements-dev.txt && pytest`
 
-   **Windows**:
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate
-   ```
+### Optional: enhancement (DeepFilterNet)
 
-   **macOS/Linux**:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
+Place the Rust `deep-filter` binary at `.deps/deep-filter` and install `soxr` from `requirements-extras.txt`. Toggle **Enhance** on the home screen.
 
-3. **Install Dependencies**:
-   ```bash
-   pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+### Optional: speaker diarization (PyAnnote)
 
-   For development/tests:
-   ```bash
-   pip install -r requirements-dev.txt
-   ```
+```bash
+# Prefer CUDA torch for long files (CPU torch cannot use the GPU for pyannote)
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip install 'pyannote.audio>=3.1.0,<5'
+# Accept gated model terms on Hugging Face once, then vendor offline weights:
+export HF_TOKEN=hf_...   # if cache empty
+PYTHONPATH=. python scripts/vendor_diarization_models.py
+```
 
-4. **Run the Application**:
-   ```bash
-   python main.py
-   ```
+Runtime loads `Models/diarization/pyannote_community_1/` with `HF_HUB_OFFLINE=1` (no Hub checks per job). Toggle **Diarize** when Setup shows Ready.
 
-   On this project's Linux development machine you may use `./run.sh` as a
-   convenience launcher for local PortAudio/CUDA library paths.
+Smoke: `PYTHONPATH=. python scripts/smoke_test_diarization.py path/to.wav`
 
-5. **Deactivate the Virtual Environment (After Use)**:
-   ```bash
-   deactivate
-   ```
+### Translate to English
 
-See `docs/runtime_requirements.md` for PortAudio and CUDA details.
+1. Activate **Multilingual Small** or **Multilingual Medium** in Setup  
+2. Set **Language** (source) e.g. Chinese or Auto-detect  
+3. Turn **Translate** On  
 
----
+Do not expect translate on `large-v3-turbo`.
 
+## Usage
 
-## Usage`:
+1. Open **Setup**, activate a profile (download if needed).
+2. On home: set Processing / Language / VAD / Decode options as needed.
+3. Record (circle button) or **Upload**; optional Enhance / Diarize / Translate.
+4. Transcript appears in the text area and is copied to the clipboard.
+5. Use history to reload recent transcripts.
 
-1. **Recording Audio**:
-   - Click the red circle button or press `Ctrl+Q` to start recording.
-   - Speak into your microphone.
-   - Click the button again or press `Ctrl+Q` to stop recording and begin transcription.
+Global hotkey (`Ctrl+Q`) may require root on Linux; use the record button if unavailable.
 
-2. **Uploading Audio Files**:
-   - Click the "Upload Audio File" button to select a `.wav` file for transcription.
+## Documentation
 
-3. **Selecting a Model**:
-   - Use the dropdown menu to select a Whisper model (e.g., `distil-small.en`, `large-v3-turbo`).
-   - The selected model will be loaded automatically.
-
-4. **Viewing Transcription**:
-   - The transcribed text will appear in the text box below the buttons.
-
-5. **Copying Text**:
-   - The transcribed text is automatically copied to the clipboard and can be pasted into any application.
-   
-## Model Selection
-
-VocalForge allows you to choose from multiple Whisper models for transcription. The available models are:
-
-- `distil-small.en`: Small English model (fastest).
-- `distil-medium.en`: Medium English model (balanced speed and accuracy).
-- `distil-large-v3`: Large multilingual model (high accuracy).
-- `large-v3-turbo`: Optimized large model for speed and accuracy.
-
-The models are stored in a `Models` folder next to the application, making it easy to manage and share.
+| Doc | Topic |
+|-----|--------|
+| `docs/phase_2.md` | Hardware profiles & Setup |
+| `docs/phase_3.md` | Transcription UX |
+| `docs/phase_4.md` | Optional extras (enhance, diarize) |
+| `docs/proposals/` | Extra evaluation proposals |
+| `docs/runtime_requirements.md` | PortAudio / CUDA |
+| `docs/clean_install.md` | Clean install notes |
 
 ## Logging
 
-The application logs all activities to a file named `superwhisper.log` in the current working directory. Logs include timestamps, log levels, and messages.
+Application log: `vocalforge.log` in the project root (see app startup).
 
 ## Notes
 
-- **Internet Connection**: An internet connection is required for the first-time model download.
-- **CUDA Support**: If a CUDA-compatible GPU is available, the application will automatically use it for faster transcription.
-- **Audio Format**: Uploaded audio files must be in `.wav` format (mono, 16-bit, 16kHz).
-- **Models Folder**: All models are stored in the `Models` folder next to the application. This folder is created automatically if it doesn’t exist.
-
-## Troubleshooting
-
-- **CUDA Not Available**: If CUDA is not available, the application will fall back to CPU processing, which may be slower.
-- **Audio Recording Issues**: Ensure that your microphone is properly configured and accessible by the application.
-- **Transcription Errors**: Check the log file for detailed error messages and ensure that the audio file is in the correct format.
-- **Model Download Issues**: Ensure you have an active internet connection for the first-time model download.
+- First Whisper / diarization vendor download needs the network; later runs can be offline for those assets.
+- Uploads support common formats when the media helpers allow them; recordings are WAV.
+- `config.json` is local and gitignored (may hold `hf_token` for one-time diarization vendor).
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
-- **Faster Whisper**: The transcription model used in this application.
-- **Tkinter**: The GUI framework used for building the interface.
-- **Sounddevice**: The library used for audio recording.
-- **Keyboard**: The library used for global hotkey support.
-
-## Contact
-
-For any questions or issues, please open an issue on the GitHub repository or contact the maintainer directly.
-
-Enjoy using **VocalForge**! 🎙️✨
+Faster-Whisper, CTranslate2, Tkinter, sounddevice, DeepFilterNet, pyannote.audio.

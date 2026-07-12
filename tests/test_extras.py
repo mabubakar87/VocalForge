@@ -28,11 +28,15 @@ def test_probe_all_returns_statuses_without_crash():
 
 
 def test_default_environment_reports_not_installed():
-    """Non-enhancement extras stay not_installed; enhancement is READY when CLI works."""
+    """Extras stay not_installed unless their READY probes succeed locally."""
+    from vocalforge.diarization import is_diarization_ready
     from vocalforge.enhancement import is_enhancement_available
 
     for extra, status in probe_all():
         if extra.id == "enhancement" and is_enhancement_available():
+            assert status is ExtraStatus.READY
+            continue
+        if extra.id == "diarization" and is_diarization_ready():
             assert status is ExtraStatus.READY
             continue
         assert status is ExtraStatus.NOT_INSTALLED

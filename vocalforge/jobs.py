@@ -12,8 +12,10 @@ from typing import Any, Callable, Optional
 
 from vocalforge.audio import AudioRecorder, resolve_input_device_index, save_wav
 from vocalforge.clipboard import ClipboardSettings, deliver_text
+from vocalforge.diarization import DiarizationError, diarize_wav, resolve_diarization_device
 from vocalforge.enhancement import EnhancementError, enhance_wav, is_enhancement_available
 from vocalforge.media import is_supported_upload
+from vocalforge.merge import assign_speakers, format_speaker_transcript, group_words_by_speaker
 from vocalforge.state import AppState, StateMachine
 from vocalforge.storage import AppPaths, enhanced_audio_path, recorded_audio_path, save_transcript
 from vocalforge.transcription import TranscriptionCancelled, TranscriptionService
@@ -61,9 +63,18 @@ class JobController:
         self._stop_recording = threading.Event()
         self._cancel_transcription = threading.Event()
         self.enhance_audio: bool = False
+        self.diarize_speakers: bool = False
+        self.hf_token: str | None = None
 
     def set_enhance_audio(self, enabled: bool) -> None:
         self.enhance_audio = bool(enabled)
+
+    def set_diarize_speakers(self, enabled: bool) -> None:
+        self.diarize_speakers = bool(enabled)
+
+    def set_hf_token(self, token: str | None) -> None:
+        value = (token or "").strip()
+        self.hf_token = value or None
 
     def _set_state(self, target: AppState, job_id: str | None = None) -> bool:
         if not self.state.try_transition(target):
@@ -314,6 +325,85 @@ class JobController:
                             )
                         )
 
+            diarization_turns: list[dict[str, Any]] | None = None
+            if self.diarize_speakers:
+                if audio_path.suffix.lower() != ".wav":
+                    logger.warning(
+                        "Speaker diarization skips non-WAV upload (%s); unlabeled transcript.",
+                        audio_path.suffix,
+                    )
+                else:
+                    self.emit(
+                        JobEvent(
+                            EventType.STATUS,
+                            job_id=job_id,
+                            payload={"text": "Diarizing speakers…"},
+                        )
+                    )
+                    try:
+                        # Prefer CUDA when torch has it. Unload Whisper first so a
+                        # 4 GB card can run pyannote without sharing VRAM with ASR.
+                        diarize_device = resolve_diarization_device("auto")
+                        saved_model = self.transcription.model_name
+                        saved_device = self.transcription.device
+                        saved_compute = self.transcription.compute_type
+                        unloaded = False
+                        if diarize_device == "cuda" and saved_model and self.transcription.is_ready:
+                            logger.info(
+                                "Temporarily unloading Whisper (%s on %s) for GPU diarization.",
+                                saved_model,
+                                saved_device,
+                            )
+                            self.transcription.release()
+                            unloaded = True
+                        try:
+                            diarization_turns = diarize_wav(
+                                audio_path,
+                                hf_token=self.hf_token,
+                                device=diarize_device,
+                                models_root=self.paths.models,
+                            )
+                        finally:
+                            if unloaded and saved_model:
+                                self.emit(
+                                    JobEvent(
+                                        EventType.STATUS,
+                                        job_id=job_id,
+                                        payload={"text": "Reloading transcription model…"},
+                                    )
+                                )
+                                self.transcription.load_model(
+                                    saved_model,
+                                    device=saved_device,
+                                    compute_type=saved_compute,
+                                )
+                        speakers = sorted(
+                            {
+                                str(turn.get("speaker"))
+                                for turn in diarization_turns
+                                if turn.get("speaker")
+                            }
+                        )
+                        logger.info(
+                            "Diarization found %s turn(s), %s speaker(s): %s",
+                            len(diarization_turns),
+                            len(speakers),
+                            ", ".join(speakers) or "(none)",
+                        )
+                    except DiarizationError as exc:
+                        logger.warning(
+                            "Diarization failed (%s); continuing with unlabeled ASR.",
+                            exc,
+                        )
+                        diarization_turns = None
+                        self.emit(
+                            JobEvent(
+                                EventType.STATUS,
+                                job_id=job_id,
+                                payload={"text": "Diarization failed — transcribing without speakers…"},
+                            )
+                        )
+
             if self._cancel_transcription.is_set():
                 if self._is_current(job_id):
                     self._set_state(AppState.READY, job_id=job_id)
@@ -345,11 +435,22 @@ class JobController:
                     )
                 )
 
-            result = self.transcription.transcribe(
-                audio_path,
-                cancel_event=self._cancel_transcription,
-                progress_callback=on_progress,
-            )
+            # Word timings let us split one Whisper segment across speaker turns.
+            restore_word_ts: bool | None = None
+            if diarization_turns is not None and not self.transcription.word_timestamps:
+                restore_word_ts = False
+                self.transcription.set_decode_options(word_timestamps=True)
+
+            try:
+                result = self.transcription.transcribe(
+                    audio_path,
+                    cancel_event=self._cancel_transcription,
+                    progress_callback=on_progress,
+                )
+            finally:
+                if restore_word_ts is not None:
+                    self.transcription.set_decode_options(word_timestamps=restore_word_ts)
+
             if not self._is_current(job_id):
                 return
             if self._cancel_transcription.is_set():
@@ -362,15 +463,27 @@ class JobController:
                     )
                 )
                 return
-            transcript_path = save_transcript(self.paths, result.formatted_text)
-            deliver_text(result.formatted_text, self.clipboard_settings)
+
+            output_text = result.formatted_text
+            if diarization_turns is not None:
+                if result.words:
+                    labeled = group_words_by_speaker(result.words, diarization_turns)
+                elif result.segments:
+                    labeled = assign_speakers(result.segments, diarization_turns)
+                else:
+                    labeled = []
+                if labeled:
+                    output_text = format_speaker_transcript(labeled) or result.formatted_text
+
+            transcript_path = save_transcript(self.paths, output_text)
+            deliver_text(output_text, self.clipboard_settings)
             self._set_state(AppState.READY, job_id=job_id)
             self.emit(
                 JobEvent(
                     EventType.TRANSCRIPTION_COMPLETED,
                     job_id=job_id,
                     payload={
-                        "text": result.formatted_text,
+                        "text": output_text,
                         "transcript_path": str(transcript_path),
                         "device": result.device,
                     },

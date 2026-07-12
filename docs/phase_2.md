@@ -17,9 +17,11 @@ model, device, and language.
 
 | ID | Label | Model | Notes |
 |----|-------|-------|-------|
-| `lightweight` | Lightweight | `distil-small.en` | English-only, CPU-oriented (`int8`) |
-| `balanced` | Balanced | `distil-medium.en` | English-only; CUDA when usable |
-| `high_accuracy` | High Accuracy | `large-v3-turbo` | Multilingual; language selectable |
+| `lightweight` | Lightweight | `distil-small.en` | English-only, CPU-oriented (`int8`); ~160 MB |
+| `multilingual_small` | Multilingual Small | `small` (Systran) | Multilingual ASR + **translate → English**; ~480 MB |
+| `balanced` | Balanced | `distil-medium.en` | English-only; CUDA when usable; ~800 MB |
+| `multilingual_medium` | Multilingual Medium | `medium` (Systran) | Stronger ASR + **translate**; ~1.5 GB |
+| `high_accuracy` | High Accuracy | `large-v3-turbo` | Multilingual ASR; **no** translate; ~1.6 GB |
 
 Recommendation (deterministic):
 
@@ -38,7 +40,7 @@ Persisted fields used by Phase 2:
 - `selected_model`
 - `preferred_device` (`cpu` / `cuda`)
 - `language` (Whisper code or `null` for auto-detect)
-- `task` (`transcribe`; legacy `translate` maps to English)
+- `task` (`transcribe` / `translate` — translate only on profiles with `supports_translate`)
 
 ## UI
 

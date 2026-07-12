@@ -1,29 +1,35 @@
 # Phase 4 — Optional Advanced Pipelines
 
-Branch: `phase-4-advanced-pipelines`.
+Branches: `phase-4-advanced-pipelines` (foundation + enhancement), `phase-4-diarization` (P4-020 + translate profiles / Setup UX).
 
-### Done (foundation + enhancement spike)
+### Shipped
 
-- **P4-000…003** Extras registry, proposals, Setup panel, extras requirements scaffold
-- **P4-030** Enhancement proposal **Approved** (Rust `deep-filter` path)
-- **P4-060 spike** `vocalforge/enhancement.py` — 16→48→enhance→16 via soxr + CLI  
-  Metrics: ~0.6–0.7 s / 3 s clip, ~57 MB child RSS, 0 VRAM  
-  Report: `tests/fixtures/enhancement/out/spike_report.json`
+- Extras registry + Setup **Optional Extras** (4 equal columns) + scrollable Setup
+- **Enhancement:** DeepFilterNet CLI + soxr; home **Enhance**
+- **Diarization:** offline `pyannote/speaker-diarization-community-1` under `Models/diarization/`; vendor script; home **Diarize**; GPU when CUDA torch is available (Whisper unloaded briefly)
+- **Translate profiles:** Multilingual Small (`small`) and Medium (`medium`) with `supports_translate`; home **Translate** (disabled on turbo / English-only)
+- Profiles ordered by size; Setup Model row shows `name (compute_type)`
+
+### Diarization install
+
+```bash
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip install 'pyannote.audio>=3.1.0,<5'
+export HF_TOKEN=hf_...   # first vendor only, if needed
+PYTHONPATH=. python scripts/vendor_diarization_models.py
+PYTHONPATH=. python scripts/smoke_test_diarization.py
+```
 
 ### Next
 
-1. **P4-020 sign-off** — read `docs/proposals/diarization.md` and approve/reject conditions
-2. If approved → bounded spike: HF token Setup UX + PyAnnote diarize + merge onto Faster-Whisper
-3. Other tracks still gated: P4-010 / 040
-4. P4-050 resource rules as more extras land
+1. Alignment / separation proposals (P4-010 / P4-040)
+2. Diarization hardware measurements on long multi-speaker audio
 
-**Enhancement:** home **Enhance** On/Off (`enhance_audio`). Requires `.deps/deep-filter` + `soxr`.
-
-| Track | Topic | Status |
-|-------|--------|--------|
-| P4-010 | Forced word alignment | Stub |
-| P4-020 | Speaker diarization | Proposal ready — await sign-off |
+| ID | Capability | Status |
+|----|------------|--------|
+| P4-020 | Speaker diarization | Shipped (Ready when vendored) |
 | P4-030 | Speech enhancement | Shipped (Ready) |
-| P4-040 | Source separation | Stub |
+| P4-010 | Forced alignment | Proposal stub |
+| P4-040 | Source separation | Proposal stub |
 
-See `docs/proposals/enhancement.md` and `plan/01-Upgrade/task_breakdown_phase_4.md`.
+See `docs/proposals/diarization.md`, `docs/proposals/enhancement.md`, root `README.md`.

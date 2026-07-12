@@ -82,6 +82,7 @@ Default tests exclude GPU, microphone, network, and slow markers.
 
 ## Optional extras (Phase 4)
 
-Do **not** install `requirements-extras.txt` into the base environment until the
-matching proposal under `docs/proposals/` is **Approved**. Base transcription
-uses only `requirements.txt`. See `docs/phase_4.md`.
+Base transcription uses only `requirements.txt`. Enhancement and diarization
+need packages listed in `requirements-extras.txt` plus local assets (DeepFilterNet
+binary; vendored PyAnnote under `Models/diarization/`). Prefer CUDA PyTorch for
+diarization on long files. See `docs/phase_4.md` and the root `README.md`.
