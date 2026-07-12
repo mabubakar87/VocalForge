@@ -1,0 +1,20 @@
+# Virtual environment
+venv/
+
+# Whisper models cache
+Models/
+
+# Local PortAudio / extracted system deps
+.deps/
+
+# Generated transcripts
+transcripts/
+
+# Application log
+vocalforge.log
+
+# Audio files
+audio_files/
+
+# Plan
+plan/

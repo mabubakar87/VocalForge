@@ -16,7 +16,6 @@ import logging
 from datetime import datetime
 import requests
 import array
-from tqdm import tqdm  # Import tqdm for progress bar
 import keyboard  # Import the keyboard module
 import shutil
 
@@ -67,6 +66,36 @@ selected_model = MODELS[0]  # Default model
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Models")
 os.makedirs(MODELS_DIR, exist_ok=True)  # Create the folder if it doesn't exist
 
+TRANSCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcripts")
+os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
+
+AUDIO_FILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio_files")
+os.makedirs(AUDIO_FILES_DIR, exist_ok=True)
+
+# Thread-safe UI updates: workers enqueue callables; the main thread drains them.
+ui_queue = queue.Queue()
+
+def ui_call(fn):
+    """Schedule a callable to run on the Tk main thread."""
+    ui_queue.put(fn)
+
+def set_status(text, fg="white"):
+    """Update status label on the Tk main thread (safe from worker threads)."""
+    ui_call(lambda: status_label.config(text=text, fg=fg))
+
+def poll_ui_queue():
+    """Drain pending UI callbacks; must run on the Tk main thread."""
+    try:
+        while True:
+            fn = ui_queue.get_nowait()
+            try:
+                fn()
+            except Exception as e:
+                logging.error(f"UI callback failed: {e}")
+    except queue.Empty:
+        pass
+    root.after(50, poll_ui_queue)
+
 def load_model():
     """Load the selected model in a separate thread."""
     global model, selected_model
@@ -82,36 +111,25 @@ def load_model():
     def download_model():
         """Function to download the model in a separate thread."""
         try:
-            # Create a progress bar
-            with tqdm(total=100, desc="Downloading", unit="%", ncols=80) as pbar:
-                # Define a callback to update the progress bar
-                def update_progress(current, total):
-                    progress = int((current / total) * 100)
-                    pbar.update(progress - pbar.n)  # Update the progress bar
-                    root.update_idletasks()  # Force update the GUI
-
-                # Load the model
-                global model
-                model = WhisperModel(
-                    selected_model,
-                    device=device,
-                    download_root=MODELS_DIR
-                )
-
-            # Update status label after download
-            status_label.config(text=f"Model '{selected_model}' loaded successfully.", fg="white")
+            global model
+            model = WhisperModel(
+                selected_model,
+                device=device,
+                download_root=MODELS_DIR
+            )
+            set_status(f"Model '{selected_model}' loaded successfully.")
             logging.info(f"Model '{selected_model}' loaded successfully from {MODELS_DIR}.")
         except Exception as e:
             logging.error(f"Failed to load model: {e}")
-            status_label.config(text="Error loading model", fg="red")
+            set_status("Error loading model", fg="red")
             if not is_internet_available():
-                messagebox.showerror(
+                ui_call(lambda: messagebox.showerror(
                     "Internet Required",
                     "Internet is required for first-time model downloading. Please connect to the internet and try again."
-                )
-                sys.exit(1)
+                ))
             else:
-                raise
+                err = str(e)
+                ui_call(lambda: messagebox.showerror("Model Error", err))
 
     # Start the download in a separate thread
     threading.Thread(target=download_model, daemon=True).start()
@@ -180,12 +198,13 @@ def record():
     global recording, processing
     try:
         audio_data = record_audio()
-        save_wav("recorded_audio.wav", audio_data)
-        transcribe_audio("recorded_audio.wav")        
+        recorded_path = os.path.join(AUDIO_FILES_DIR, "recorded_audio.wav")
+        save_wav(recorded_path, audio_data)
+        transcribe_audio(recorded_path)
         processing = False
     except Exception as e:
         logging.error(f"Error during recording or transcription: {e}")
-        status_label.config(text="Error", fg="red")
+        set_status("Error", fg="red")
 
 def format_text(text):
     text = re.sub(r'\s+', ' ', text).strip()
@@ -199,7 +218,7 @@ def save_transcript(text):
     """Save the transcribed text to a file with a timestamp."""
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"transcript_{timestamp}.txt"
+        filename = os.path.join(TRANSCRIPTS_DIR, f"transcript_{timestamp}.txt")
         with open(filename, "w", encoding="utf-8") as file:
             file.write(text)
         logging.info(f"Transcript saved to {filename}.")
@@ -212,13 +231,16 @@ def transcribe_audio(file_path):
         text = " ".join(segment.text for segment in segments)
         formatted_text = format_text(text)
         insert_text(formatted_text)
-        text_output.delete(1.0, tk.END)
-        text_output.insert(tk.END, formatted_text)
+        def show_text():
+            text_output.delete(1.0, tk.END)
+            text_output.insert(tk.END, formatted_text)
+        ui_call(show_text)
         save_transcript(formatted_text)  # Save the transcript to a file
         logging.info("Transcription completed successfully.")
-        status_label.config(text="Transcription Completed", fg="white")
+        set_status("Transcription Completed")
     except Exception as e:
         logging.error(f"Error during transcription: {e}")
+        set_status("Error", fg="red")
         raise
 
 def insert_text(text):
@@ -320,8 +342,11 @@ def auto_hide_scrollbar():
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
 def global_hotkey_listener():
-    keyboard.add_hotkey("ctrl+q", toggle_recording)  # Register the hotkey globally
-    keyboard.wait()  # Keep the listener running
+    try:
+        keyboard.add_hotkey("ctrl+q", toggle_recording)  # Register the hotkey globally
+        keyboard.wait()  # Keep the listener running
+    except Exception as e:
+        logging.warning(f"Global hotkey unavailable (use the record button instead): {e}")
 
 # Run the hotkey listener in a separate thread
 hotkey_thread = threading.Thread(target=global_hotkey_listener, daemon=True)
@@ -336,6 +361,9 @@ style.configure("Rounded.TFrame", background="#1E1E1E", borderwidth=0, relief="f
 
 # Load the default model
 load_model()
+
+# Drain worker-thread UI updates on the main thread
+poll_ui_queue()
 
 # Run the application
 root.mainloop()
