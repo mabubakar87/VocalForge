@@ -79,3 +79,9 @@ pytest
 ```
 
 Default tests exclude GPU, microphone, network, and slow markers.
+
+## Optional extras (Phase 4)
+
+Do **not** install `requirements-extras.txt` into the base environment until the
+matching proposal under `docs/proposals/` is **Approved**. Base transcription
+uses only `requirements.txt`. See `docs/phase_4.md`.

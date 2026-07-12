@@ -20,6 +20,7 @@ def test_round_trip(tmp_path: Path):
             vad_filter=False,
             beam_size=10,
             word_timestamps=True,
+            enhance_audio=True,
             auto_paste=False,
         ),
     )
@@ -30,6 +31,7 @@ def test_round_trip(tmp_path: Path):
     assert loaded.vad_filter is False
     assert loaded.beam_size == 10
     assert loaded.word_timestamps is True
+    assert loaded.enhance_audio is True
     assert loaded.auto_paste is False
     assert loaded.schema_version == 2
 

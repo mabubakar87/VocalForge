@@ -13,6 +13,7 @@ from vocalforge.audio import DEFAULT_INPUT_LABEL, list_input_devices
 from vocalforge.capabilities import CapabilityReport
 from vocalforge.clipboard import ClipboardSettings
 from vocalforge.config import AppConfig, save_config
+from vocalforge.extras import ExtraStatus, probe_all, status_label
 from vocalforge.formatting import prepare_ui_text, resolve_transcript_font_family, resolve_ui_font_family
 from vocalforge.jobs import EventType, JobController, JobEvent
 from vocalforge.media import UPLOAD_FILEDIALOG_TYPES, is_supported_upload
@@ -48,6 +49,10 @@ from vocalforge.transcription import BEAM_SIZE_CHOICES, DEFAULT_BEAM_SIZE
 logger = logging.getLogger(__name__)
 
 SESSION_TOOLTIPS = {
+    "device": (
+        "Run transcription on CPU or GPU (CUDA). Changing this reloads the active "
+        "profile on the selected device. GPU is disabled when CUDA is not usable."
+    ),
     "language": (
         "Language spoken in the audio. Auto-detect lets the model guess; "
         "pick a language for better accuracy when you know it. "
@@ -70,6 +75,10 @@ SESSION_TOOLTIPS = {
     "timestamps": (
         "When On, each transcript segment is prefixed with [start–end] timing. "
         "Useful for reviewing longer files; slightly more work for the model."
+    ),
+    "enhance": (
+        "When On, WAV recordings/uploads are denoised with DeepFilterNet before "
+        "transcription. Default Off. Requires .deps/deep-filter and soxr."
     ),
     "history": (
         "Reload a previously saved transcript from this session’s transcripts folder."
@@ -97,8 +106,8 @@ class SetupDashboard(tk.Toplevel):
         self.title("VocalForge Setup")
         self.configure(bg=Theme.bg)
         self._ui_font = resolve_ui_font_family(self)
-        self.geometry("920x860")
-        self.minsize(820, 800)
+        self.geometry("920x900")
+        self.minsize(820, 820)
         self.capabilities = capabilities
         self.paths = paths
         self.config = config
@@ -108,7 +117,6 @@ class SetupDashboard(tk.Toplevel):
         self.on_settings_changed = on_settings_changed or (lambda: None)
         self.vram_gb = vram_gb
         self.recommendation = recommend_profile(capabilities, vram_gb)
-        self._device_var = tk.StringVar(value=self._default_device_choice())
         self._language_mode = tk.StringVar(
             value=language_mode_from_config(self.config.language, self.config.task)
         )
@@ -141,7 +149,6 @@ class SetupDashboard(tk.Toplevel):
 
     def present(self) -> None:
         """Show an existing Setup window quickly (reuse instead of recreating)."""
-        self._device_var.set(self._default_device_choice())
         self._language_mode.set(
             language_mode_from_config(self.config.language, self.config.task)
         )
@@ -174,7 +181,8 @@ class SetupDashboard(tk.Toplevel):
         return selected if selected in {"cpu", "cuda"} else "cpu"
 
     def _preferred_device(self) -> str:
-        return self._device_var.get()
+        """Prefer the home-screen device setting stored in config."""
+        return self._default_device_choice()
 
     def _build(self) -> None:
         if self._body is not None:
@@ -182,10 +190,10 @@ class SetupDashboard(tk.Toplevel):
         self._body = tk.Frame(self, bg=Theme.bg)
         self._body.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
         self._build_system_spec(self._body)
-        self._build_processing_preference(self._body)
         self._table_host = tk.Frame(self._body, bg=Theme.bg)
         self._table_host.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
         self._build_profiles_table(self._table_host)
+        self._build_optional_extras(self._body)
         hoverable_button(
             self._body,
             text="Close",
@@ -228,12 +236,11 @@ class SetupDashboard(tk.Toplevel):
         ]
         grid = tk.Frame(section, bg=Theme.surface)
         grid.pack(fill=tk.X)
-        for column in range(3):
+        for column in range(6):
             grid.grid_columnconfigure(column, weight=1, uniform="specs")
         for index, (label, value) in enumerate(specs):
-            row, column = divmod(index, 3)
-            cell = tk.Frame(grid, bg=Theme.surface_2, padx=12, pady=10)
-            cell.grid(row=row, column=column, sticky="nsew", padx=4, pady=4)
+            cell = tk.Frame(grid, bg=Theme.surface_2, padx=8, pady=8)
+            cell.grid(row=0, column=index, sticky="nsew", padx=3, pady=2)
             tk.Label(cell, text=label.upper(), fg=Theme.muted, bg=Theme.surface_2, font=(self._ui_font, 8), anchor="w").pack(
                 fill=tk.X
             )
@@ -242,9 +249,9 @@ class SetupDashboard(tk.Toplevel):
                 text=value,
                 fg=Theme.text,
                 bg=Theme.surface_2,
-                font=(self._ui_font, 10, "bold"),
+                font=(self._ui_font, 9, "bold"),
                 anchor="w",
-                wraplength=240,
+                wraplength=130,
                 justify="left",
             ).pack(fill=tk.X, pady=(4, 0))
         tk.Label(
@@ -258,19 +265,40 @@ class SetupDashboard(tk.Toplevel):
             anchor="w",
         ).pack(fill=tk.X, pady=(10, 0))
 
-    def _build_processing_preference(self, parent: tk.Frame) -> None:
-        section = tk.Frame(parent, bg=Theme.surface, padx=16, pady=14, highlightbackground=Theme.border, highlightthickness=1)
-        section.pack(fill=tk.X, pady=(0, 12))
+    def _build_optional_extras(self, parent: tk.Frame) -> None:
+        section = tk.Frame(
+            parent,
+            bg=Theme.surface,
+            padx=16,
+            pady=14,
+            highlightbackground=Theme.border,
+            highlightthickness=1,
+        )
+        section.pack(fill=tk.X, pady=(12, 0))
+        header = tk.Frame(section, bg=Theme.surface)
+        header.pack(fill=tk.X, pady=(0, 6))
         tk.Label(
-            section,
-            text="Processing Device",
+            header,
+            text="Optional Extras (Phase 4)",
             fg=Theme.text,
             bg=Theme.surface,
             font=(self._ui_font, 13, "bold"),
-        ).pack(anchor="w", pady=(0, 6))
+        ).pack(side=tk.LEFT)
+        InfoTip(
+            header,
+            text=(
+                "Advanced pipelines stay out of the base install until a proposal "
+                "is approved. Status is an import check only — nothing is downloaded here."
+            ),
+            font_family=self._ui_font,
+            bg=Theme.surface,
+        ).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(
             section,
-            text="Choose whether transcription should run on CPU or GPU. Changing this reloads the active profile on the selected device.",
+            text=(
+                "Speech enhancement is unlocked when deep-filter + soxr are available. "
+                "Other extras still need an approved proposal before enablement."
+            ),
             fg=Theme.muted,
             bg=Theme.surface,
             font=(self._ui_font, 9),
@@ -278,67 +306,67 @@ class SetupDashboard(tk.Toplevel):
             justify="left",
             anchor="w",
         ).pack(fill=tk.X, pady=(0, 10))
-        disabled = set() if cuda_is_usable(self.capabilities) else {"cuda"}
-        SegmentedControl(
-            section,
-            options=(("cpu", "CPU"), ("cuda", "GPU (CUDA)")),
-            variable=self._device_var,
-            command=self._on_device_preference_changed,
-            font_family=self._ui_font,
-            disabled_values=disabled,
-        ).pack(anchor="w")
-        if not cuda_is_usable(self.capabilities):
+
+        grid = tk.Frame(section, bg=Theme.surface)
+        grid.pack(fill=tk.X)
+        for column in range(2):
+            grid.grid_columnconfigure(column, weight=1, uniform="extras")
+
+        for index, (extra, status) in enumerate(probe_all()):
+            row, column = divmod(index, 2)
+            cell = tk.Frame(grid, bg=Theme.surface_2, padx=12, pady=10)
+            cell.grid(row=row, column=column, sticky="nsew", padx=4, pady=4)
+            title = tk.Frame(cell, bg=Theme.surface_2)
+            title.pack(fill=tk.X)
             tk.Label(
-                section,
-                text="GPU is disabled because CUDA is not usable on this machine.",
-                fg=Theme.warning,
-                bg=Theme.surface,
-                font=(self._ui_font, 9),
+                title,
+                text=extra.label,
+                fg=Theme.text,
+                bg=Theme.surface_2,
+                font=(self._ui_font, 10, "bold"),
                 anchor="w",
-            ).pack(fill=tk.X, pady=(10, 0))
-
-    def _on_device_preference_changed(self) -> None:
-        choice = self._preferred_device()
-        if choice == "cuda" and not cuda_is_usable(self.capabilities):
-            self._device_var.set("cpu")
-            choice = "cpu"
-            messagebox.showwarning("GPU Unavailable", "CUDA is not usable on this machine. Staying on CPU.")
-        self.config.preferred_device = choice
-        save_config(self.config_path, self.config)
-        if self._table_host is not None:
-            for child in self._table_host.winfo_children():
-                child.destroy()
-            self._build_profiles_table(self._table_host)
-        self._apply_device_to_active_profile(choice)
-
-    def _apply_device_to_active_profile(self, preferred: str) -> None:
-        """Reload the active profile when the processing device changes."""
-        profile_id = self.config.active_profile
-        if profile_id not in PROFILES:
-            return
-        profile = PROFILES[profile_id]
-        runtime = resolve_runtime(profile, self.capabilities, preferred_device=preferred)
-        current = (
-            self.controller.transcription.device
-            if self.controller.transcription.is_ready
-            else None
-        )
-        if current == runtime.device:
-            return
-        if not self.controller.can_change_profile():
-            messagebox.showwarning(
-                "Busy",
-                "Device preference saved. It will apply the next time you activate a profile.",
-            )
-            return
-        ok = self.controller.activate_profile(
-            profile.id,
-            runtime.device,
-            runtime.compute_type,
-            profile.model,
-        )
-        if ok:
-            self.on_activated(profile)
+            ).pack(side=tk.LEFT)
+            status_fg = Theme.muted if status is ExtraStatus.NOT_INSTALLED else Theme.warning
+            if status is ExtraStatus.READY:
+                status_fg = Theme.success
+            tk.Label(
+                title,
+                text=status_label(status),
+                fg=status_fg,
+                bg=Theme.surface_2,
+                font=(self._ui_font, 8, "bold"),
+                anchor="e",
+            ).pack(side=tk.RIGHT)
+            tk.Label(
+                cell,
+                text=extra.summary,
+                fg=Theme.muted,
+                bg=Theme.surface_2,
+                font=(self._ui_font, 9),
+                wraplength=400,
+                justify="left",
+                anchor="w",
+            ).pack(fill=tk.X, pady=(6, 0))
+            engines = ", ".join(extra.candidate_engines)
+            tk.Label(
+                cell,
+                text=f"Candidates: {engines}  ·  {extra.proposal_doc}",
+                fg=Theme.muted,
+                bg=Theme.surface_2,
+                font=(self._ui_font, 8),
+                wraplength=400,
+                justify="left",
+                anchor="w",
+            ).pack(fill=tk.X, pady=(4, 0))
+            if extra.id == "enhancement" and status is ExtraStatus.READY:
+                tk.Label(
+                    cell,
+                    text="Control: home screen → Enhance",
+                    fg=Theme.muted,
+                    bg=Theme.surface_2,
+                    font=(self._ui_font, 8),
+                    anchor="w",
+                ).pack(fill=tk.X, pady=(6, 0))
 
     def _build_profiles_table(self, parent: tk.Frame) -> None:
         table = tk.Frame(parent, bg=Theme.bg)
@@ -625,15 +653,29 @@ class MainWindow:
         frame = tk.Frame(self.root, bg=Theme.bg)
         frame.pack(pady=14, padx=18, fill=tk.X)
 
+        header = tk.Frame(frame, bg=Theme.bg)
+        header.pack(fill=tk.X, pady=(0, 10))
         brand = tk.Label(
-            frame,
+            header,
             text="VocalForge",
             fg=Theme.accent,
             bg=Theme.bg,
             font=(self._ui_font, 18, "bold"),
             anchor="w",
         )
-        brand.pack(fill=tk.X, pady=(0, 10))
+        brand.pack(side=tk.LEFT)
+        self.setup_button = hoverable_button(
+            header,
+            text="Setup / Profiles",
+            command=self.open_setup,
+            font_family=self._ui_font,
+            bg=Theme.surface_2,
+            fg=Theme.text,
+            hover_bg=Theme.surface_3,
+            padx=16,
+            pady=9,
+        )
+        self.setup_button.pack(side=tk.RIGHT)
 
         info = tk.Frame(
             frame,
@@ -653,27 +695,50 @@ class MainWindow:
             anchor="w",
         ).pack(fill=tk.X, pady=(0, 8))
 
-        rows = tk.Frame(info, bg=Theme.surface)
-        rows.pack(fill=tk.X)
-        for column in range(4):
-            rows.grid_columnconfigure(column, weight=1, uniform="session")
+        row1 = tk.Frame(info, bg=Theme.surface)
+        row1.pack(fill=tk.X)
+        for column in range(5):
+            row1.grid_columnconfigure(column, weight=1, uniform="session1")
 
-        self.profile_value = self._session_cell(rows, 0, 0, "Profile", "None")
-        self.model_value = self._session_cell(rows, 0, 1, "Model", "Not selected")
-        self.device_value = self._session_cell(rows, 0, 2, "Transcription via", "—")
+        self.profile_value = self._session_cell(row1, 0, 0, "Profile", "None")
+        self.model_value = self._session_cell(row1, 0, 1, "Model", "Not selected")
+        self._device_body = self._session_body(
+            row1, 0, 2, "Processing", tooltip=SESSION_TOOLTIPS["device"]
+        )
+        preferred = (self.config.preferred_device or self.capabilities.selected_device or "cpu").lower()
+        if preferred == "cuda" and not cuda_is_usable(self.capabilities):
+            preferred = "cpu"
+        if preferred not in {"cpu", "cuda"}:
+            preferred = "cpu"
+        self.config.preferred_device = preferred
+        self._device_var = tk.StringVar(value=preferred)
+        disabled = set() if cuda_is_usable(self.capabilities) else {"cuda"}
+        SegmentedControl(
+            self._device_body,
+            options=(("cpu", "CPU"), ("cuda", "GPU")),
+            variable=self._device_var,
+            command=self._on_device_preference_changed,
+            font_family=self._ui_font,
+            disabled_values=disabled,
+        ).pack(anchor="w")
         self._language_body = self._session_body(
-            rows, 0, 3, "Language", tooltip=SESSION_TOOLTIPS["language"]
+            row1, 0, 3, "Language", tooltip=SESSION_TOOLTIPS["language"]
         )
         self.language_value: tk.Label | None = None
         self._language_dropdown: ModernDropdown | None = None
         self._language_labels = {label: mode_id for mode_id, label, _lang, _task in LANGUAGE_OPTIONS}
 
         self._mic_body = self._session_body(
-            rows, 1, 0, "Microphone", tooltip=SESSION_TOOLTIPS["microphone"]
+            row1, 0, 4, "Microphone", tooltip=SESSION_TOOLTIPS["microphone"]
         )
         self._mic_dropdown: ModernDropdown | None = None
 
-        self._vad_body = self._session_body(rows, 1, 1, "VAD", tooltip=SESSION_TOOLTIPS["vad"])
+        row2 = tk.Frame(info, bg=Theme.surface)
+        row2.pack(fill=tk.X, pady=(2, 0))
+        for column in range(4):
+            row2.grid_columnconfigure(column, weight=1, uniform="session2")
+
+        self._vad_body = self._session_body(row2, 0, 0, "VAD", tooltip=SESSION_TOOLTIPS["vad"])
         self._vad_var = tk.StringVar(value="on" if self.config.vad_filter else "off")
         SegmentedControl(
             self._vad_body,
@@ -684,7 +749,7 @@ class MainWindow:
         ).pack(anchor="w")
 
         self._beam_body = self._session_body(
-            rows, 1, 2, "Beam size", tooltip=SESSION_TOOLTIPS["beam"]
+            row2, 0, 1, "Beam size", tooltip=SESSION_TOOLTIPS["beam"]
         )
         self._beam_dropdown: ModernDropdown | None = None
         beam = self.config.beam_size if self.config.beam_size in BEAM_SIZE_CHOICES else DEFAULT_BEAM_SIZE
@@ -700,7 +765,7 @@ class MainWindow:
         self._beam_dropdown.pack(anchor="w")
 
         self._timestamps_body = self._session_body(
-            rows, 1, 3, "Timestamps", tooltip=SESSION_TOOLTIPS["timestamps"]
+            row2, 0, 2, "Timestamps", tooltip=SESSION_TOOLTIPS["timestamps"]
         )
         self._timestamps_var = tk.StringVar(value="on" if self.config.word_timestamps else "off")
         SegmentedControl(
@@ -711,21 +776,37 @@ class MainWindow:
             font_family=self._ui_font,
         ).pack(anchor="w")
 
+        self._enhance_body = self._session_body(
+            row2, 0, 3, "Enhance", tooltip=SESSION_TOOLTIPS["enhance"]
+        )
+        from vocalforge.enhancement import is_enhancement_available
+
+        enhance_ready = is_enhancement_available()
+        if self.config.enhance_audio and not enhance_ready:
+            self.config.enhance_audio = False
+            save_config(self.config_path, self.config)
+            self.controller.set_enhance_audio(False)
+        self._enhance_var = tk.StringVar(value="on" if self.config.enhance_audio else "off")
+        if enhance_ready:
+            SegmentedControl(
+                self._enhance_body,
+                options=(("on", "On"), ("off", "Off")),
+                variable=self._enhance_var,
+                command=self._on_enhance_audio_changed,
+                font_family=self._ui_font,
+            ).pack(anchor="w")
+        else:
+            tk.Label(
+                self._enhance_body,
+                text="Not installed",
+                fg=Theme.muted,
+                bg=Theme.surface_2,
+                font=(self._ui_font, 9),
+                anchor="w",
+            ).pack(fill=tk.X)
+
         self._refresh_profile_label()
         self._refresh_mic_control()
-
-        self.setup_button = hoverable_button(
-            frame,
-            text="Setup / Profiles",
-            command=self.open_setup,
-            font_family=self._ui_font,
-            bg=Theme.surface_2,
-            fg=Theme.text,
-            hover_bg=Theme.surface_3,
-            padx=16,
-            pady=9,
-        )
-        self.setup_button.pack(pady=(0, 10))
 
         self.status_label = tk.Label(
             frame,
@@ -742,8 +823,10 @@ class MainWindow:
         self.record_button = self.canvas.create_image(44, 44, image=self._record_idle_img)
         self.canvas.bind("<Button-1>", lambda _event: self.on_record_clicked())
 
+        actions = tk.Frame(self.root, bg=Theme.bg)
+        actions.pack(pady=8)
         self.upload_button = hoverable_button(
-            self.root,
+            actions,
             text="Upload Audio File",
             command=self.on_upload,
             font_family=self._ui_font,
@@ -753,10 +836,10 @@ class MainWindow:
             padx=16,
             pady=9,
         )
-        self.upload_button.pack(pady=8)
+        self.upload_button.pack(side=tk.LEFT, padx=(0, 8))
 
         self.cancel_button = hoverable_button(
-            self.root,
+            actions,
             text="Cancel",
             command=self.on_cancel,
             font_family=self._ui_font,
@@ -766,7 +849,7 @@ class MainWindow:
             padx=16,
             pady=9,
         )
-        self.cancel_button.pack(pady=(0, 4))
+        self.cancel_button.pack(side=tk.LEFT)
         self.cancel_button.configure(state="disabled")
 
         text_frame = tk.Frame(
@@ -1011,6 +1094,63 @@ class MainWindow:
         self.controller.transcription.set_vad_filter(enabled)
         self._set_status(f"Voice activity filter {'enabled' if enabled else 'disabled'}.")
 
+    def _on_enhance_audio_changed(self) -> None:
+        enabled = self._enhance_var.get() == "on"
+        from vocalforge.enhancement import is_enhancement_available
+
+        if enabled and not is_enhancement_available():
+            self._enhance_var.set("off")
+            messagebox.showwarning(
+                "Enhancement Unavailable",
+                "deep-filter and soxr are required. See requirements-extras.txt.",
+            )
+            return
+        self.config.enhance_audio = enabled
+        save_config(self.config_path, self.config)
+        self.controller.set_enhance_audio(enabled)
+        self._set_status(f"Audio enhancement {'enabled' if enabled else 'disabled'}.")
+
+    def _on_device_preference_changed(self) -> None:
+        choice = self._device_var.get()
+        if choice == "cuda" and not cuda_is_usable(self.capabilities):
+            self._device_var.set("cpu")
+            choice = "cpu"
+            messagebox.showwarning("GPU Unavailable", "CUDA is not usable on this machine. Staying on CPU.")
+        self.config.preferred_device = choice
+        save_config(self.config_path, self.config)
+        self._apply_device_to_active_profile(choice)
+
+    def _apply_device_to_active_profile(self, preferred: str) -> None:
+        """Reload the active profile when the processing device changes."""
+        profile_id = self.config.active_profile
+        if profile_id not in PROFILES:
+            self._set_status(f"Device preference saved: {preferred.upper()}.")
+            return
+        profile = PROFILES[profile_id]
+        runtime = resolve_runtime(profile, self.capabilities, preferred_device=preferred)
+        current = (
+            self.controller.transcription.device
+            if self.controller.transcription.is_ready
+            else None
+        )
+        if current == runtime.device:
+            self._set_status(f"Already using {self._device_display_label(runtime.device)}.")
+            return
+        if not self.controller.can_change_profile():
+            messagebox.showwarning(
+                "Busy",
+                "Device preference saved. It will apply the next time you activate a profile.",
+            )
+            return
+        ok = self.controller.activate_profile(
+            profile.id,
+            runtime.device,
+            runtime.compute_type,
+            profile.model,
+        )
+        if ok:
+            self._set_status(f"Switching to {self._device_display_label(runtime.device)}…")
+
     def _on_beam_selected(self, label: str) -> None:
         try:
             beam = int(label)
@@ -1109,12 +1249,11 @@ class MainWindow:
             self.profile_value.config(text="None")
             self.model_value.config(text="Not selected")
 
-        device = None
-        if self.controller.transcription.is_ready:
-            device = self.controller.transcription.device
-        elif self.config.preferred_device:
-            device = self.config.preferred_device
-        self.device_value.config(text=self._device_display_label(device))
+        preferred = (self.config.preferred_device or "cpu").lower()
+        if preferred == "cuda" and not cuda_is_usable(self.capabilities):
+            preferred = "cpu"
+        if preferred in {"cpu", "cuda"} and self._device_var.get() != preferred:
+            self._device_var.set(preferred)
         self._refresh_language_control()
 
     def open_setup(self) -> None:

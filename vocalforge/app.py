@@ -85,6 +85,7 @@ def run() -> None:
         beam_size=config.beam_size,
         word_timestamps=config.word_timestamps,
     )
+    controller.set_enhance_audio(config.enhance_audio)
 
     root = tk.Tk()
     create_app(
