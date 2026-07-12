@@ -8,9 +8,7 @@ import queue
 import threading
 import wave
 from pathlib import Path
-from typing import Optional
-
-import sounddevice as sd
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +26,18 @@ def save_wav(filename: str | Path, data: array.array, samplerate: int = 16000) -
     return path
 
 
+def _import_sounddevice():
+    """Import sounddevice lazily so unit tests can load this module without PortAudio."""
+    try:
+        import sounddevice as sd
+    except OSError as exc:
+        raise OSError(
+            "PortAudio library not found. Install PortAudio (see docs/runtime_requirements.md) "
+            "or launch with ./run.sh on this development machine."
+        ) from exc
+    return sd
+
+
 class AudioRecorder:
     """Capture 16 kHz mono int16 audio until stopped."""
 
@@ -36,7 +46,7 @@ class AudioRecorder:
         self.channels = channels
         self._queue: queue.Queue = queue.Queue()
         self._recording = False
-        self._stream: Optional[sd.InputStream] = None
+        self._stream: Optional[Any] = None
         self._lock = threading.Lock()
 
     def _callback(self, indata, frames, time_info, status) -> None:  # noqa: ANN001
@@ -46,6 +56,7 @@ class AudioRecorder:
             self._queue.put(indata.copy())
 
     def start(self) -> None:
+        sd = _import_sounddevice()
         with self._lock:
             if self._recording:
                 return
