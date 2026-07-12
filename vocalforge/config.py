@@ -10,14 +10,17 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass
 class AppConfig:
     schema_version: int = SCHEMA_VERSION
     selected_model: str = ""
-    language: str | None = None
+    active_profile: str = ""
+    preferred_device: str = ""  # "", "cpu", or "cuda"
+    language: str | None = None  # Whisper language code; None = auto-detect
+    task: str = "transcribe"  # always "transcribe" (legacy "translate" is migrated away)
     auto_paste: bool = False
     input_device: str | None = None
 
@@ -39,7 +42,7 @@ def load_config(path: Path) -> AppConfig:
         cfg = AppConfig(**filtered)
         if cfg.schema_version != SCHEMA_VERSION:
             logger.warning(
-                "Config schema_version=%s; expected %s. Using compatible fields.",
+                "Config schema_version=%s; upgrading compatible fields to %s.",
                 cfg.schema_version,
                 SCHEMA_VERSION,
             )

@@ -10,16 +10,10 @@ from vocalforge.capabilities import evaluate_capabilities
 from vocalforge.clipboard import ClipboardSettings
 from vocalforge.config import load_config, save_config
 from vocalforge.jobs import JobController
+from vocalforge.profiles import probe_vram_gb
 from vocalforge.storage import default_paths
 from vocalforge.transcription import TranscriptionService
 from vocalforge.ui import create_app
-
-MODELS = [
-    "",
-    "distil-small.en (151 MB)",
-    "distil-medium.en (1.42 GB)",
-    "large-v3-turbo (3.1 GB)",
-]
 
 
 def configure_logging(log_file) -> None:
@@ -58,11 +52,14 @@ def run() -> None:
     logging.info("Application started.")
 
     capabilities = evaluate_capabilities()
+    vram_gb = probe_vram_gb()
     logging.info(
         "Using device: %s%s",
         capabilities.selected_device,
         f" ({capabilities.fallback_reason})" if capabilities.fallback_reason else "",
     )
+    if vram_gb is not None:
+        logging.info("Detected VRAM: %.1f GB", vram_gb)
 
     config_path = paths.root / "config.json"
     config = load_config(config_path)
@@ -81,6 +78,14 @@ def run() -> None:
     )
 
     root = tk.Tk()
-    create_app(root, controller, config, config_path, MODELS)
+    create_app(
+        root,
+        controller,
+        config,
+        config_path,
+        capabilities=capabilities,
+        paths=paths,
+        vram_gb=vram_gb,
+    )
     try_start_hotkey(controller)
     root.mainloop()

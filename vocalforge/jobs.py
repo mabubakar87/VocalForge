@@ -76,6 +76,23 @@ class JobController:
     def _is_current(self, job_id: str) -> bool:
         return self._active_job_id == job_id
 
+    def can_change_profile(self) -> bool:
+        return self.state.state in {AppState.NO_MODEL, AppState.READY, AppState.ERROR, AppState.STARTING}
+
+    def activate_profile(self, profile_id: str, device: str, compute_type: str, model_name: str) -> bool:
+        """Apply profile runtime settings and load the profile model."""
+        if not self.can_change_profile():
+            self.emit(
+                JobEvent(
+                    EventType.JOB_FAILED,
+                    payload={"message": "Cannot change profile while a job is active."},
+                )
+            )
+            return False
+        self.transcription.device = device
+        self.transcription.compute_type = compute_type
+        return self.load_model(model_name)
+
     def load_model(self, model_name: str) -> bool:
         if not model_name:
             self.emit(

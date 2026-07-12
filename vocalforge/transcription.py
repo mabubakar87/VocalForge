@@ -33,6 +33,8 @@ class TranscriptionService:
         self.download_root = Path(download_root)
         self.device = device
         self.compute_type = compute_type or ("int8" if device == "cpu" else "default")
+        self.language: str | None = None
+        self.task: str = "transcribe"
         self._model_factory = model_factory
         self._model: Any = None
         self._model_name: Optional[str] = None
@@ -99,10 +101,17 @@ class TranscriptionService:
                 return self.load_model(model_name, device="cpu", compute_type="int8")
             raise
 
+    def set_language_settings(self, language: str | None, task: str = "transcribe") -> None:
+        self.language = language
+        self.task = task if task in {"transcribe", "translate"} else "transcribe"
+
     def transcribe(self, file_path: str | Path) -> TranscriptionResult:
         if self._model is None or self._model_name is None:
             raise RuntimeError("No model is loaded.")
-        segments, _info = self._model.transcribe(str(file_path))
+        kwargs: dict[str, Any] = {"task": self.task}
+        if self.language:
+            kwargs["language"] = self.language
+        segments, _info = self._model.transcribe(str(file_path), **kwargs)
         text = " ".join(segment.text for segment in segments)
         formatted = format_text(text)
         return TranscriptionResult(
