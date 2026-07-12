@@ -25,3 +25,19 @@ def test_next_transcript_path_avoids_collision(tmp_path: Path):
     first.write_text("a", encoding="utf-8")
     second = next_transcript_path(paths)
     assert first != second
+
+
+def test_list_and_read_transcripts(tmp_path: Path):
+    from datetime import datetime, timedelta
+
+    from vocalforge.storage import list_transcripts, read_transcript, transcript_label
+
+    paths = default_paths(tmp_path)
+    base = datetime(2026, 7, 12, 12, 0, 0)
+    older = save_transcript(paths, "first", when=base)
+    newer = save_transcript(paths, "second", when=base + timedelta(seconds=5))
+    listed = list_transcripts(paths)
+    assert listed[0] == newer
+    assert older in listed
+    assert read_transcript(newer) == "second"
+    assert transcript_label(newer)
