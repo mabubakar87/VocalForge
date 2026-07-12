@@ -76,6 +76,15 @@ def run() -> None:
         emit=lambda _event: None,
         clipboard_settings=ClipboardSettings(auto_paste=config.auto_paste),
     )
+    try:
+        controller.set_input_device(config.input_device)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Could not apply saved input device (%s); using default.", exc)
+    transcription.set_vad_filter(config.vad_filter)
+    transcription.set_decode_options(
+        beam_size=config.beam_size,
+        word_timestamps=config.word_timestamps,
+    )
 
     root = tk.Tk()
     create_app(

@@ -5,15 +5,25 @@ from __future__ import annotations
 import logging
 import queue
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext
 from typing import Optional
 
+from vocalforge.audio import DEFAULT_INPUT_LABEL, list_input_devices
 from vocalforge.capabilities import CapabilityReport
 from vocalforge.clipboard import ClipboardSettings
 from vocalforge.config import AppConfig, save_config
 from vocalforge.formatting import prepare_ui_text, resolve_transcript_font_family, resolve_ui_font_family
 from vocalforge.jobs import EventType, JobController, JobEvent
-from vocalforge.ui.theme import ModernDropdown, SegmentedControl, Theme, hoverable_button, make_record_button_images
+from vocalforge.media import UPLOAD_FILEDIALOG_TYPES, is_supported_upload
+from vocalforge.ui.theme import (
+    InfoTip,
+    ModernDropdown,
+    SegmentedControl,
+    Theme,
+    hoverable_button,
+    make_record_button_images,
+)
 from vocalforge.profiles import (
     LANGUAGE_OPTIONS,
     PROFILE_ORDER,
@@ -32,9 +42,39 @@ from vocalforge.profiles import (
     resolve_runtime,
 )
 from vocalforge.state import AppState
-from vocalforge.storage import AppPaths
+from vocalforge.storage import AppPaths, list_transcripts, read_transcript, transcript_label
+from vocalforge.transcription import BEAM_SIZE_CHOICES, DEFAULT_BEAM_SIZE
 
 logger = logging.getLogger(__name__)
+
+SESSION_TOOLTIPS = {
+    "language": (
+        "Language spoken in the audio. Auto-detect lets the model guess; "
+        "pick a language for better accuracy when you know it. "
+        "Only available on High Accuracy (multilingual) profiles."
+    ),
+    "microphone": (
+        "Input device used for recording. System default follows your OS setting; "
+        "choose a specific mic if you have more than one."
+    ),
+    "vad": (
+        "Voice Activity Detection strips long silence before transcription. "
+        "On reduces hallucinations on quiet tails; Off sends the full recording "
+        "when soft speech is being clipped."
+    ),
+    "beam": (
+        "How thoroughly the decoder searches for the best wording. "
+        "1 is fastest, 5 is the balanced default, 10 is slower and often "
+        "slightly more accurate on difficult audio."
+    ),
+    "timestamps": (
+        "When On, each transcript segment is prefixed with [start–end] timing. "
+        "Useful for reviewing longer files; slightly more work for the model."
+    ),
+    "history": (
+        "Reload a previously saved transcript from this session’s transcripts folder."
+    ),
+}
 
 
 class SetupDashboard(tk.Toplevel):
@@ -546,7 +586,8 @@ class MainWindow:
         self._current_state = AppState.STARTING
 
         self.root.title("VocalForge")
-        self.root.geometry("560x660")
+        self.root.geometry("760x780")
+        self.root.minsize(700, 680)
         self.root.configure(bg=Theme.bg)
         self._ui_font = resolve_ui_font_family(self.root)
         self.root.resizable(True, True)
@@ -614,14 +655,64 @@ class MainWindow:
 
         rows = tk.Frame(info, bg=Theme.surface)
         rows.pack(fill=tk.X)
-        for column in range(2):
+        for column in range(4):
             rows.grid_columnconfigure(column, weight=1, uniform="session")
 
         self.profile_value = self._session_cell(rows, 0, 0, "Profile", "None")
         self.model_value = self._session_cell(rows, 0, 1, "Model", "Not selected")
-        self.device_value = self._session_cell(rows, 1, 0, "Transcription via", "—")
-        self.language_value = self._session_cell(rows, 1, 1, "Language", "—")
+        self.device_value = self._session_cell(rows, 0, 2, "Transcription via", "—")
+        self._language_body = self._session_body(
+            rows, 0, 3, "Language", tooltip=SESSION_TOOLTIPS["language"]
+        )
+        self.language_value: tk.Label | None = None
+        self._language_dropdown: ModernDropdown | None = None
+        self._language_labels = {label: mode_id for mode_id, label, _lang, _task in LANGUAGE_OPTIONS}
+
+        self._mic_body = self._session_body(
+            rows, 1, 0, "Microphone", tooltip=SESSION_TOOLTIPS["microphone"]
+        )
+        self._mic_dropdown: ModernDropdown | None = None
+
+        self._vad_body = self._session_body(rows, 1, 1, "VAD", tooltip=SESSION_TOOLTIPS["vad"])
+        self._vad_var = tk.StringVar(value="on" if self.config.vad_filter else "off")
+        SegmentedControl(
+            self._vad_body,
+            options=(("on", "On"), ("off", "Off")),
+            variable=self._vad_var,
+            command=self._on_vad_changed,
+            font_family=self._ui_font,
+        ).pack(anchor="w")
+
+        self._beam_body = self._session_body(
+            rows, 1, 2, "Beam size", tooltip=SESSION_TOOLTIPS["beam"]
+        )
+        self._beam_dropdown: ModernDropdown | None = None
+        beam = self.config.beam_size if self.config.beam_size in BEAM_SIZE_CHOICES else DEFAULT_BEAM_SIZE
+        self.config.beam_size = beam
+        self._beam_dropdown = ModernDropdown(
+            self._beam_body,
+            options=[str(size) for size in BEAM_SIZE_CHOICES],
+            selected=str(beam),
+            on_select=self._on_beam_selected,
+            font_family=self._ui_font,
+            width=6,
+        )
+        self._beam_dropdown.pack(anchor="w")
+
+        self._timestamps_body = self._session_body(
+            rows, 1, 3, "Timestamps", tooltip=SESSION_TOOLTIPS["timestamps"]
+        )
+        self._timestamps_var = tk.StringVar(value="on" if self.config.word_timestamps else "off")
+        SegmentedControl(
+            self._timestamps_body,
+            options=(("on", "On"), ("off", "Off")),
+            variable=self._timestamps_var,
+            command=self._on_timestamps_changed,
+            font_family=self._ui_font,
+        ).pack(anchor="w")
+
         self._refresh_profile_label()
+        self._refresh_mic_control()
 
         self.setup_button = hoverable_button(
             frame,
@@ -664,6 +755,20 @@ class MainWindow:
         )
         self.upload_button.pack(pady=8)
 
+        self.cancel_button = hoverable_button(
+            self.root,
+            text="Cancel",
+            command=self.on_cancel,
+            font_family=self._ui_font,
+            bg=Theme.surface_2,
+            fg=Theme.text,
+            hover_bg=Theme.surface_3,
+            padx=16,
+            pady=9,
+        )
+        self.cancel_button.pack(pady=(0, 4))
+        self.cancel_button.configure(state="disabled")
+
         text_frame = tk.Frame(
             self.root,
             bg=Theme.surface,
@@ -679,6 +784,56 @@ class MainWindow:
             font=(self._ui_font, 8, "bold"),
             anchor="w",
         ).pack(fill=tk.X, padx=12, pady=(10, 0))
+
+        history_row = tk.Frame(text_frame, bg=Theme.surface)
+        history_row.pack(fill=tk.X, padx=12, pady=(6, 0))
+        history_label_row = tk.Frame(history_row, bg=Theme.surface)
+        history_label_row.pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(
+            history_label_row,
+            text="History",
+            fg=Theme.muted,
+            bg=Theme.surface,
+            font=(self._ui_font, 8),
+        ).pack(side=tk.LEFT)
+        InfoTip(
+            history_label_row,
+            text=SESSION_TOOLTIPS["history"],
+            font_family=self._ui_font,
+            bg=Theme.surface,
+        ).pack(side=tk.LEFT, padx=(4, 0))
+        self._history_body = tk.Frame(history_row, bg=Theme.surface)
+        self._history_body.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._history_dropdown: ModernDropdown | None = None
+        self._history_paths: dict[str, Path] = {}
+
+        actions = tk.Frame(text_frame, bg=Theme.surface)
+        actions.pack(fill=tk.X, padx=12, pady=(6, 0))
+        self.copy_button = hoverable_button(
+            actions,
+            text="Copy",
+            command=self.on_copy_transcript,
+            font_family=self._ui_font,
+            bg=Theme.surface_2,
+            fg=Theme.text,
+            hover_bg=Theme.surface_3,
+            padx=12,
+            pady=6,
+        )
+        self.copy_button.pack(side=tk.LEFT, padx=(0, 6))
+        self.save_button = hoverable_button(
+            actions,
+            text="Save As…",
+            command=self.on_save_transcript,
+            font_family=self._ui_font,
+            bg=Theme.surface_2,
+            fg=Theme.text,
+            hover_bg=Theme.surface_3,
+            padx=12,
+            pady=6,
+        )
+        self.save_button.pack(side=tk.LEFT)
+
         transcript_font = (resolve_transcript_font_family(self.root), 13)
         self._last_transcript = ""
         self.text_output = scrolledtext.ScrolledText(
@@ -699,27 +854,55 @@ class MainWindow:
         self.text_output.bind("<<Copy>>", self._copy_logical_transcript)
         self.text_output.bind("<Control-c>", self._copy_logical_transcript)
         self.text_output.bind("<Control-C>", self._copy_logical_transcript)
+        self._refresh_history_control()
 
     def _session_cell(
         self, parent: tk.Frame, row: int, column: int, label: str, value: str
     ) -> tk.Label:
-        cell = tk.Frame(parent, bg=Theme.surface_2, padx=10, pady=8)
-        cell.grid(row=row, column=column, sticky="nsew", padx=3, pady=3)
-        tk.Label(cell, text=label.upper(), fg=Theme.muted, bg=Theme.surface_2, font=(self._ui_font, 8), anchor="w").pack(
-            fill=tk.X
-        )
+        body = self._session_body(parent, row, column, label)
         value_label = tk.Label(
-            cell,
+            body,
             text=value,
             fg=Theme.text,
             bg=Theme.surface_2,
             font=(self._ui_font, 10, "bold"),
             anchor="w",
-            wraplength=220,
+            wraplength=150,
             justify="left",
         )
         value_label.pack(fill=tk.X, pady=(4, 0))
         return value_label
+
+    def _session_body(
+        self,
+        parent: tk.Frame,
+        row: int,
+        column: int,
+        label: str,
+        tooltip: str | None = None,
+    ) -> tk.Frame:
+        cell = tk.Frame(parent, bg=Theme.surface_2, padx=10, pady=8)
+        cell.grid(row=row, column=column, sticky="nsew", padx=3, pady=3)
+        header = tk.Frame(cell, bg=Theme.surface_2)
+        header.pack(fill=tk.X)
+        tk.Label(
+            header,
+            text=label.upper(),
+            fg=Theme.muted,
+            bg=Theme.surface_2,
+            font=(self._ui_font, 8),
+            anchor="w",
+        ).pack(side=tk.LEFT)
+        if tooltip:
+            InfoTip(
+                header,
+                text=tooltip,
+                font_family=self._ui_font,
+                bg=Theme.surface_2,
+            ).pack(side=tk.LEFT, padx=(4, 0))
+        body = tk.Frame(cell, bg=Theme.surface_2)
+        body.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        return body
 
     def _language_display_label(self) -> str:
         profile_id = self.config.active_profile
@@ -731,6 +914,167 @@ class MainWindow:
         return language_option_label(
             language_mode_from_config(self.config.language, self.config.task)
         )
+
+    def _refresh_language_control(self) -> None:
+        for child in self._language_body.winfo_children():
+            child.destroy()
+        self.language_value = None
+        self._language_dropdown = None
+
+        profile_id = self.config.active_profile
+        profile = PROFILES.get(profile_id)
+        if profile is not None and not profile.english_only:
+            labels = [label for _mode_id, label, _lang, _task in LANGUAGE_OPTIONS]
+            current = language_option_label(
+                language_mode_from_config(self.config.language, self.config.task)
+            )
+            self._language_dropdown = ModernDropdown(
+                self._language_body,
+                options=labels,
+                selected=current,
+                on_select=self._on_home_language_selected,
+                font_family=self._ui_font,
+                width=10,
+            )
+            self._language_dropdown.pack(fill=tk.X)
+            return
+
+        self.language_value = tk.Label(
+            self._language_body,
+            text=self._language_display_label(),
+            fg=Theme.text,
+            bg=Theme.surface_2,
+            font=(self._ui_font, 10, "bold"),
+            anchor="w",
+            wraplength=150,
+            justify="left",
+        )
+        self.language_value.pack(fill=tk.X)
+
+    def _on_home_language_selected(self, label: str) -> None:
+        mode_id = self._language_labels.get(label, "auto")
+        language, task = language_settings_for_mode(mode_id)
+        self.config.language = language
+        self.config.task = task
+        save_config(self.config_path, self.config)
+        self.controller.transcription.set_language_settings(language, task)
+        if self._setup_win is not None:
+            try:
+                if self._setup_win.winfo_exists():
+                    self._setup_win._language_mode.set(mode_id)
+            except tk.TclError:
+                pass
+        self._set_status(f"Language set to {label}.")
+
+    def _refresh_mic_control(self) -> None:
+        for child in self._mic_body.winfo_children():
+            child.destroy()
+        self._mic_dropdown = None
+        try:
+            devices = list_input_devices()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Microphone list unavailable: %s", exc)
+            devices = []
+        labels = [device.label for device in devices] or [DEFAULT_INPUT_LABEL]
+        saved = self.config.input_device or DEFAULT_INPUT_LABEL
+        selected = saved if saved in labels else DEFAULT_INPUT_LABEL
+        self._mic_dropdown = ModernDropdown(
+            self._mic_body,
+            options=labels,
+            selected=selected,
+            on_select=self._on_mic_selected,
+            font_family=self._ui_font,
+            width=12,
+        )
+        self._mic_dropdown.pack(fill=tk.X)
+
+    def _on_mic_selected(self, label: str) -> None:
+        if self._current_state is AppState.RECORDING:
+            self._set_status("Cannot change microphone while recording.", fg=Theme.warning)
+            self._refresh_mic_control()
+            return
+        saved = None if label == DEFAULT_INPUT_LABEL else label
+        try:
+            self.controller.set_input_device(saved)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Microphone", str(exc))
+            self._refresh_mic_control()
+            return
+        self.config.input_device = saved
+        save_config(self.config_path, self.config)
+        self._set_status(f"Microphone: {label}")
+
+    def _on_vad_changed(self) -> None:
+        enabled = self._vad_var.get() == "on"
+        self.config.vad_filter = enabled
+        save_config(self.config_path, self.config)
+        self.controller.transcription.set_vad_filter(enabled)
+        self._set_status(f"Voice activity filter {'enabled' if enabled else 'disabled'}.")
+
+    def _on_beam_selected(self, label: str) -> None:
+        try:
+            beam = int(label)
+        except ValueError:
+            beam = DEFAULT_BEAM_SIZE
+        self.config.beam_size = beam
+        save_config(self.config_path, self.config)
+        self.controller.transcription.set_decode_options(beam_size=beam)
+        self._set_status(f"Beam size set to {beam}.")
+
+    def _on_timestamps_changed(self) -> None:
+        enabled = self._timestamps_var.get() == "on"
+        self.config.word_timestamps = enabled
+        save_config(self.config_path, self.config)
+        self.controller.transcription.set_decode_options(word_timestamps=enabled)
+        self._set_status(f"Word timestamps {'enabled' if enabled else 'disabled'}.")
+
+    def _refresh_history_control(self) -> None:
+        for child in self._history_body.winfo_children():
+            child.destroy()
+        self._history_dropdown = None
+        self._history_paths = {}
+        paths = list_transcripts(self.paths)
+        if not paths:
+            tk.Label(
+                self._history_body,
+                text="No saved transcripts yet",
+                fg=Theme.muted,
+                bg=Theme.surface,
+                font=(self._ui_font, 9),
+                anchor="w",
+            ).pack(fill=tk.X)
+            return
+        labels: list[str] = []
+        for path in paths:
+            label = transcript_label(path)
+            # Disambiguate collisions in the dropdown.
+            if label in self._history_paths:
+                label = f"{label} ({path.name})"
+            self._history_paths[label] = path
+            labels.append(label)
+        self._history_dropdown = ModernDropdown(
+            self._history_body,
+            options=labels,
+            selected=labels[0],
+            on_select=self._on_history_selected,
+            font_family=self._ui_font,
+            width=22,
+        )
+        self._history_dropdown.pack(fill=tk.X)
+
+    def _on_history_selected(self, label: str) -> None:
+        path = self._history_paths.get(label)
+        if path is None or not path.exists():
+            self._set_status("Transcript file missing.", fg=Theme.warning)
+            self._refresh_history_control()
+            return
+        try:
+            text = read_transcript(path)
+        except OSError as exc:
+            messagebox.showerror("History", str(exc))
+            return
+        self._set_transcript_display(text)
+        self._set_status(f"Loaded {path.name}")
 
     def _set_transcript_display(self, text: str) -> None:
         """Show transcript with Arabic shaping for Tk; keep logical text for copy."""
@@ -771,7 +1115,7 @@ class MainWindow:
         elif self.config.preferred_device:
             device = self.config.preferred_device
         self.device_value.config(text=self._device_display_label(device))
-        self.language_value.config(text=self._language_display_label())
+        self._refresh_language_control()
 
     def open_setup(self) -> None:
         if self._setup_win is not None:
@@ -816,18 +1160,60 @@ class MainWindow:
     def on_record_clicked(self) -> None:
         self.controller.toggle_recording()
 
+    def on_cancel(self) -> None:
+        if self.controller.cancel():
+            self._set_status("Cancelling…")
+
     def on_upload(self) -> None:
-        file_path = filedialog.askopenfilename(filetypes=[("Audio Files", "*.wav")])
-        if file_path:
-            self.controller.transcribe_upload(file_path)
+        file_path = filedialog.askopenfilename(filetypes=UPLOAD_FILEDIALOG_TYPES)
+        if not file_path:
+            return
+        if not is_supported_upload(file_path):
+            messagebox.showerror(
+                "Upload",
+                "Unsupported audio format. Try WAV, MP3, M4A, FLAC, OGG, or WebM.",
+            )
+            return
+        self.controller.transcribe_upload(file_path)
+
+    def on_copy_transcript(self) -> None:
+        if not self._last_transcript:
+            self._set_status("Nothing to copy.", fg=Theme.warning)
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._last_transcript)
+        self._set_status("Copied to clipboard.")
+
+    def on_save_transcript(self) -> None:
+        if not self._last_transcript:
+            self._set_status("Nothing to save.", fg=Theme.warning)
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+            initialfile="transcript.txt",
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(self._last_transcript, encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("Save", str(exc))
+            return
+        self._set_status(f"Saved {Path(path).name}")
+        self._refresh_history_control()
 
     def _apply_control_state(self, state: AppState) -> None:
         self._current_state = state
         ready = state is AppState.READY
         recording = state is AppState.RECORDING
+        transcribing = state is AppState.TRANSCRIBING
         can_select = state in {AppState.NO_MODEL, AppState.READY, AppState.ERROR}
         self.setup_button.configure(state=("normal" if can_select else "disabled"))
         self.upload_button.configure(state=("normal" if ready else "disabled"))
+        self.cancel_button.configure(
+            state=("normal" if recording or transcribing else "disabled")
+        )
         if recording:
             self.canvas.itemconfig(self.record_button, image=self._record_active_img)
         else:
@@ -857,7 +1243,14 @@ class MainWindow:
         elif event.type is EventType.TRANSCRIPTION_COMPLETED:
             text = payload.get("text", "")
             self._set_transcript_display(text)
+            self._refresh_history_control()
             self._set_status("Transcription Completed")
+        elif event.type is EventType.TRANSCRIPTION_CANCELLED:
+            self._set_status(payload.get("message", "Cancelled."), fg=Theme.warning)
+        elif event.type is EventType.PROGRESS:
+            percent = payload.get("percent")
+            if percent is not None:
+                self._set_status(f"Transcribing… {percent}%")
         elif event.type is EventType.JOB_FAILED:
             self._set_status("Error", fg=Theme.danger)
             message = payload.get("message")

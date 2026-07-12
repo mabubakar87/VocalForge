@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -23,6 +24,9 @@ class AppConfig:
     task: str = "transcribe"  # always "transcribe" (legacy "translate" is migrated away)
     auto_paste: bool = False
     input_device: str | None = None
+    vad_filter: bool = True  # Faster-Whisper Silero VAD; strips long silence
+    beam_size: int = 5  # Faster-Whisper decode beam (1=fast, 5=default, 10=careful)
+    word_timestamps: bool = False  # Segment timestamps in transcript when enabled
 
 
 def default_config() -> AppConfig:
@@ -54,17 +58,24 @@ def load_config(path: Path) -> AppConfig:
 
 
 def save_config(path: Path, config: AppConfig) -> None:
-    """Atomically write configuration."""
+    """Atomically write configuration (hidden temp next to the target)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = asdict(config)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        delete=False,
+    # Same directory as the target so os.replace stays atomic; leading dot keeps
+    # the brief temp out of normal file-explorer listings.
+    fd, temp_name = tempfile.mkstemp(
+        prefix=".config-",
         suffix=".tmp",
-    ) as handle:
-        json.dump(payload, handle, indent=2)
-        handle.write("\n")
-        temp_name = handle.name
-    Path(temp_name).replace(path)
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise

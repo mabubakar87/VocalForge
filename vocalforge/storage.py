@@ -62,3 +62,27 @@ def save_transcript(paths: AppPaths, text: str, when: datetime | None = None) ->
     path = next_transcript_path(paths, when=when)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def list_transcripts(paths: AppPaths, limit: int = 40) -> list[Path]:
+    """Newest-first transcript files under the transcripts directory."""
+    files = [
+        path
+        for path in paths.transcripts.glob("transcript_*.txt")
+        if path.is_file()
+    ]
+    # mtime first; filename stamp breaks ties when writes land in the same second.
+    files.sort(key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
+    return files[: max(0, limit)]
+
+
+def read_transcript(path: Path) -> str:
+    return Path(path).read_text(encoding="utf-8")
+
+
+def transcript_label(path: Path) -> str:
+    """Short label for history dropdowns."""
+    name = Path(path).stem
+    if name.startswith("transcript_"):
+        name = name[len("transcript_") :]
+    return name.replace("_", " ")

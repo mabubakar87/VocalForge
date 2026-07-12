@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -10,6 +11,22 @@ from typing import Any, Callable, Optional
 from vocalforge.formatting import format_text
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_BEAM_SIZE = 5
+BEAM_SIZE_CHOICES = (1, 5, 10)
+
+
+class TranscriptionCancelled(Exception):
+    """Raised when a transcription job is cancelled mid-stream."""
+
+
+def format_timestamp(seconds: float) -> str:
+    total = max(0, int(seconds))
+    minutes, secs = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
 
 
 @dataclass
@@ -35,6 +52,9 @@ class TranscriptionService:
         self.compute_type = compute_type or ("int8" if device == "cpu" else "default")
         self.language: str | None = None
         self.task: str = "transcribe"
+        self.vad_filter: bool = True
+        self.beam_size: int = DEFAULT_BEAM_SIZE
+        self.word_timestamps: bool = False
         self._model_factory = model_factory
         self._model: Any = None
         self._model_name: Optional[str] = None
@@ -105,15 +125,66 @@ class TranscriptionService:
         self.language = language
         self.task = task if task in {"transcribe", "translate"} else "transcribe"
 
-    def transcribe(self, file_path: str | Path) -> TranscriptionResult:
+    def set_vad_filter(self, enabled: bool) -> None:
+        self.vad_filter = bool(enabled)
+
+    def set_decode_options(self, *, beam_size: int | None = None, word_timestamps: bool | None = None) -> None:
+        if beam_size is not None:
+            self.beam_size = max(1, int(beam_size))
+        if word_timestamps is not None:
+            self.word_timestamps = bool(word_timestamps)
+
+    def transcribe(
+        self,
+        file_path: str | Path,
+        *,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[float], None] | None = None,
+    ) -> TranscriptionResult:
         if self._model is None or self._model_name is None:
             raise RuntimeError("No model is loaded.")
-        kwargs: dict[str, Any] = {"task": self.task}
+        kwargs: dict[str, Any] = {
+            "task": self.task,
+            "vad_filter": self.vad_filter,
+            "beam_size": self.beam_size,
+            "word_timestamps": self.word_timestamps,
+        }
         if self.language:
             kwargs["language"] = self.language
-        segments, _info = self._model.transcribe(str(file_path), **kwargs)
-        text = " ".join(segment.text for segment in segments)
-        formatted = format_text(text)
+        if self.vad_filter:
+            # Slightly less conservative than library default (2000ms) for short dictation.
+            kwargs["vad_parameters"] = {"min_silence_duration_ms": 500}
+        logger.info(
+            "Transcribing %s (vad_filter=%s, language=%s, beam_size=%s, word_timestamps=%s).",
+            file_path,
+            self.vad_filter,
+            self.language or "auto",
+            self.beam_size,
+            self.word_timestamps,
+        )
+        segments, info = self._model.transcribe(str(file_path), **kwargs)
+        duration = float(getattr(info, "duration", 0.0) or 0.0) if info is not None else 0.0
+        pieces: list[str] = []
+        for segment in segments:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TranscriptionCancelled()
+            raw = (getattr(segment, "text", "") or "").strip()
+            if self.word_timestamps:
+                start = float(getattr(segment, "start", 0.0) or 0.0)
+                end = float(getattr(segment, "end", start) or start)
+                if raw:
+                    pieces.append(f"[{format_timestamp(start)}–{format_timestamp(end)}] {raw}")
+            elif raw:
+                pieces.append(raw)
+            if progress_callback is not None and duration > 0:
+                end = float(getattr(segment, "end", 0.0) or 0.0)
+                progress_callback(min(1.0, max(0.0, end / duration)))
+
+        if progress_callback is not None:
+            progress_callback(1.0)
+
+        text = "\n".join(pieces) if self.word_timestamps else " ".join(pieces)
+        formatted = format_text(text) if not self.word_timestamps else text
         return TranscriptionResult(
             text=text,
             formatted_text=formatted,

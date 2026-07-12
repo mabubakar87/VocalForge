@@ -10,11 +10,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from vocalforge.audio import AudioRecorder, save_wav
+from vocalforge.audio import AudioRecorder, resolve_input_device_index, save_wav
 from vocalforge.clipboard import ClipboardSettings, deliver_text
+from vocalforge.media import is_supported_upload
 from vocalforge.state import AppState, StateMachine
 from vocalforge.storage import AppPaths, recorded_audio_path, save_transcript
-from vocalforge.transcription import TranscriptionService
+from vocalforge.transcription import TranscriptionCancelled, TranscriptionService
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,8 @@ class EventType(str, Enum):
     MODEL_LOAD_FAILED = "MODEL_LOAD_FAILED"
     RECORDING_SAVED = "RECORDING_SAVED"
     TRANSCRIPTION_COMPLETED = "TRANSCRIPTION_COMPLETED"
+    TRANSCRIPTION_CANCELLED = "TRANSCRIPTION_CANCELLED"
+    PROGRESS = "PROGRESS"
     JOB_FAILED = "JOB_FAILED"
     SHUTDOWN_COMPLETED = "SHUTDOWN_COMPLETED"
     STATUS = "STATUS"
@@ -55,6 +58,7 @@ class JobController:
         self._lock = threading.Lock()
         self._active_job_id: Optional[str] = None
         self._stop_recording = threading.Event()
+        self._cancel_transcription = threading.Event()
 
     def _set_state(self, target: AppState, job_id: str | None = None) -> bool:
         if not self.state.try_transition(target):
@@ -78,6 +82,14 @@ class JobController:
 
     def can_change_profile(self) -> bool:
         return self.state.state in {AppState.NO_MODEL, AppState.READY, AppState.ERROR, AppState.STARTING}
+
+    def can_cancel(self) -> bool:
+        return self.state.state in {AppState.TRANSCRIBING, AppState.RECORDING}
+
+    def set_input_device(self, saved_name: str | None) -> None:
+        """Apply a saved microphone label to the recorder (None/default allowed)."""
+        index = resolve_input_device_index(saved_name)
+        self.recorder.set_device(index)
 
     def activate_profile(self, profile_id: str, device: str, compute_type: str, model_name: str) -> bool:
         """Apply profile runtime settings and load the profile model."""
@@ -156,6 +168,7 @@ class JobController:
         job_id = uuid.uuid4().hex
         self._active_job_id = job_id
         self._stop_recording.clear()
+        self._cancel_transcription.clear()
         self.emit(JobEvent(EventType.STATUS, job_id=job_id, payload={"text": "Recording...", "fg": "red"}))
 
         def worker() -> None:
@@ -165,6 +178,17 @@ class JobController:
                     self._stop_recording.wait(0.05)
                 audio = self.recorder.stop()
                 if not self._is_current(job_id):
+                    return
+                if self._cancel_transcription.is_set():
+                    if self._is_current(job_id):
+                        self._set_state(AppState.READY, job_id=job_id)
+                        self.emit(
+                            JobEvent(
+                                EventType.TRANSCRIPTION_CANCELLED,
+                                job_id=job_id,
+                                payload={"message": "Recording discarded."},
+                            )
+                        )
                     return
                 path = recorded_audio_path(self.paths)
                 save_wav(path, audio)
@@ -204,17 +228,45 @@ class JobController:
         else:
             self.start_recording()
 
+    def cancel(self) -> bool:
+        """Cancel active recording (discard) or in-flight transcription."""
+        if self.state.state is AppState.RECORDING:
+            self._cancel_transcription.set()
+            self._stop_recording.set()
+            self.emit(JobEvent(EventType.STATUS, payload={"text": "Cancelling..."}))
+            return True
+        if self.state.state is AppState.TRANSCRIBING:
+            self._cancel_transcription.set()
+            self.emit(JobEvent(EventType.STATUS, payload={"text": "Cancelling..."}))
+            return True
+        return False
+
     def transcribe_upload(self, file_path: str | Path) -> bool:
+        path = Path(file_path)
+        if not is_supported_upload(path):
+            self.emit(
+                JobEvent(
+                    EventType.JOB_FAILED,
+                    payload={
+                        "message": (
+                            f"Unsupported format '{path.suffix or path.name}'. "
+                            "Use WAV, MP3, M4A, FLAC, OGG, or similar."
+                        )
+                    },
+                )
+            )
+            return False
         if not self.transcription.is_ready or not self.state.can_upload():
             return False
         if not self._set_state(AppState.TRANSCRIBING):
             return False
         job_id = uuid.uuid4().hex
         self._active_job_id = job_id
+        self._cancel_transcription.clear()
         self.emit(JobEvent(EventType.STATUS, job_id=job_id, payload={"text": "Transcribing..."}))
 
         def worker() -> None:
-            self._transcribe_path(Path(file_path), job_id=job_id)
+            self._transcribe_path(path, job_id=job_id)
 
         threading.Thread(target=worker, daemon=True).start()
         return True
@@ -223,8 +275,42 @@ class JobController:
         try:
             if self.state.state is AppState.RECORDING:
                 self._set_state(AppState.TRANSCRIBING, job_id=job_id)
-            result = self.transcription.transcribe(file_path)
+
+            def on_progress(fraction: float) -> None:
+                if not self._is_current(job_id):
+                    return
+                percent = int(round(fraction * 100))
+                self.emit(
+                    JobEvent(
+                        EventType.PROGRESS,
+                        job_id=job_id,
+                        payload={"fraction": fraction, "percent": percent},
+                    )
+                )
+                self.emit(
+                    JobEvent(
+                        EventType.STATUS,
+                        job_id=job_id,
+                        payload={"text": f"Transcribing… {percent}%"},
+                    )
+                )
+
+            result = self.transcription.transcribe(
+                file_path,
+                cancel_event=self._cancel_transcription,
+                progress_callback=on_progress,
+            )
             if not self._is_current(job_id):
+                return
+            if self._cancel_transcription.is_set():
+                self._set_state(AppState.READY, job_id=job_id)
+                self.emit(
+                    JobEvent(
+                        EventType.TRANSCRIPTION_CANCELLED,
+                        job_id=job_id,
+                        payload={"message": "Transcription cancelled."},
+                    )
+                )
                 return
             transcript_path = save_transcript(self.paths, result.formatted_text)
             deliver_text(result.formatted_text, self.clipboard_settings)
@@ -238,6 +324,18 @@ class JobController:
                         "transcript_path": str(transcript_path),
                         "device": result.device,
                     },
+                )
+            )
+        except TranscriptionCancelled:
+            logger.info("Transcription cancelled for job %s", job_id)
+            if not self._is_current(job_id):
+                return
+            self._set_state(AppState.READY, job_id=job_id)
+            self.emit(
+                JobEvent(
+                    EventType.TRANSCRIPTION_CANCELLED,
+                    job_id=job_id,
+                    payload={"message": "Transcription cancelled."},
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -257,6 +355,7 @@ class JobController:
 
     def shutdown(self) -> None:
         self._set_state(AppState.SHUTTING_DOWN)
+        self._cancel_transcription.set()
         self._stop_recording.set()
         try:
             self.recorder.close()

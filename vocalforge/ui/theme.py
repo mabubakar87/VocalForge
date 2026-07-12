@@ -77,6 +77,109 @@ def hoverable_button(
     return btn
 
 
+class Tooltip:
+    """Hover tooltip shown near a widget."""
+
+    def __init__(
+        self,
+        widget: tk.Misc,
+        text: str,
+        *,
+        font_family: str,
+        delay_ms: int = 350,
+        wraplength: int = 260,
+    ) -> None:
+        self._widget = widget
+        self._text = text
+        self._font_family = font_family
+        self._delay_ms = delay_ms
+        self._wraplength = wraplength
+        self._after_id: str | None = None
+        self._tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._after_id = self._widget.after(self._delay_ms, self._show)
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            try:
+                self._widget.after_cancel(self._after_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._after_id = None
+
+    def _show(self) -> None:
+        self._after_id = None
+        if self._tip is not None or not self._text:
+            return
+        try:
+            if not self._widget.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        tip = tk.Toplevel(self._widget)
+        tip.wm_overrideredirect(True)
+        tip.configure(bg=Theme.border)
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        frame = tk.Frame(tip, bg=Theme.surface_3, padx=1, pady=1)
+        frame.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            frame,
+            text=self._text,
+            justify=tk.LEFT,
+            bg=Theme.surface_3,
+            fg=Theme.text,
+            font=font_tuple(self._font_family, 9),
+            wraplength=self._wraplength,
+            padx=10,
+            pady=8,
+        ).pack()
+        tip.update_idletasks()
+        x = self._widget.winfo_rootx() + 12
+        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
+        tip.geometry(f"+{x}+{y}")
+        self._tip = tip
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+            self._tip = None
+
+
+class InfoTip(tk.Label):
+    """Compact (i) control that shows a tooltip on hover."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        text: str,
+        font_family: str,
+        bg: str = Theme.surface_2,
+    ) -> None:
+        super().__init__(
+            parent,
+            text="(i)",
+            fg=Theme.accent,
+            bg=bg,
+            font=font_tuple(font_family, 8, bold=True),
+            cursor="question_arrow",
+            padx=2,
+        )
+        Tooltip(self, text, font_family=font_family)
+
+
 class ModernDropdown(tk.Frame):
     """Flat trigger + popup list — replaces ttk.Combobox."""
 

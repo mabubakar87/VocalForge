@@ -17,6 +17,9 @@ def test_round_trip(tmp_path: Path):
             selected_model="distil-small.en",
             active_profile="lightweight",
             preferred_device="cpu",
+            vad_filter=False,
+            beam_size=10,
+            word_timestamps=True,
             auto_paste=False,
         ),
     )
@@ -24,6 +27,9 @@ def test_round_trip(tmp_path: Path):
     assert loaded.selected_model == "distil-small.en"
     assert loaded.active_profile == "lightweight"
     assert loaded.preferred_device == "cpu"
+    assert loaded.vad_filter is False
+    assert loaded.beam_size == 10
+    assert loaded.word_timestamps is True
     assert loaded.auto_paste is False
     assert loaded.schema_version == 2
 
@@ -43,3 +49,11 @@ def test_invalid_json_uses_defaults(tmp_path: Path):
     cfg = load_config(path)
     assert isinstance(cfg, AppConfig)
     assert cfg.selected_model == ""
+
+
+def test_save_config_leaves_no_tmp_files(tmp_path: Path):
+    path = tmp_path / "config.json"
+    save_config(path, AppConfig(selected_model="distil-small.en"))
+    leftovers = list(tmp_path.glob("*.tmp")) + list(tmp_path.glob(".config-*.tmp"))
+    assert leftovers == []
+    assert path.exists()
