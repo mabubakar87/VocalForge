@@ -13,6 +13,9 @@ transcripts/
 # Application log
 vocalforge.log
 
+# User settings
+config.json
+
 # Audio files
 audio_files/
 
