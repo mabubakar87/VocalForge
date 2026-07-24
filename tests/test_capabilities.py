@@ -28,8 +28,29 @@ def test_cuda_selected_when_all_probes_pass(monkeypatch):
 
 def test_cuda_libs_discovered_via_ld_library_path(tmp_path, monkeypatch):
     monkeypatch.setenv("LD_LIBRARY_PATH", str(tmp_path))
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.setenv("PATH", "")
     (tmp_path / "libcublas.so.12").write_bytes(b"")
     (tmp_path / "libcudart.so.12").write_bytes(b"")
+    report = evaluate_capabilities(
+        run=lambda *a, **k: None,
+        find_library=lambda _name: None,
+        cuda_device_count=lambda: 1,
+        prefer_cuda=True,
+    )
+    assert report.cuda_runtime_libs_ok
+    assert report.selected_device == "cuda"
+
+
+def test_cuda_libs_discovered_via_cuda_path_windows_dlls(tmp_path, monkeypatch):
+    cuda_root = tmp_path / "CUDA" / "v12.8"
+    cuda_bin = cuda_root / "bin"
+    cuda_bin.mkdir(parents=True)
+    (cuda_bin / "cublas64_12.dll").write_bytes(b"")
+    (cuda_bin / "cudart64_12.dll").write_bytes(b"")
+    monkeypatch.setenv("CUDA_PATH", str(cuda_root))
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    monkeypatch.setenv("PATH", "")
     report = evaluate_capabilities(
         run=lambda *a, **k: None,
         find_library=lambda _name: None,

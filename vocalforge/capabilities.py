@@ -51,29 +51,72 @@ def _probe_ctranslate2_cuda_count() -> int:
         return 0
 
 
+def _find_library_query_names(name: str) -> list[str]:
+    """Names to pass to ctypes.util.find_library (Linux .so and Windows DLL stems)."""
+    return [
+        name,
+        f"lib{name}",
+        f"{name}.so.12",
+        f"lib{name}.so.12",
+        f"{name}64_13",
+        f"{name}64_12",
+        f"{name}64_11",
+    ]
+
+
 def _library_candidates(name: str) -> list[str]:
+    """On-disk filenames for a CUDA lib stem on Linux and Windows."""
     return [
         f"lib{name}.so",
+        f"lib{name}.so.13",
         f"lib{name}.so.12",
         f"lib{name}.so.11",
         f"{name}.so.12",
         name,
+        f"{name}64_13.dll",
+        f"{name}64_12.dll",
+        f"{name}64_11.dll",
+        f"{name}.dll",
     ]
 
 
-def _paths_from_ld_library_path() -> list[Path]:
-    raw = os.environ.get("LD_LIBRARY_PATH", "")
-    return [Path(part) for part in raw.split(":") if part]
+def _cuda_library_search_dirs() -> list[Path]:
+    """Directories that may contain CUDA runtime libraries on Linux or Windows."""
+    dirs: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        key = os.path.normcase(str(path))
+        if key not in seen:
+            seen.add(key)
+            dirs.append(path)
+
+    ld_sep = os.pathsep if os.name == "nt" else ":"
+    for part in os.environ.get("LD_LIBRARY_PATH", "").split(ld_sep):
+        if part:
+            add(Path(part))
+
+    cuda_path = os.environ.get("CUDA_PATH")
+    if cuda_path:
+        root = Path(cuda_path)
+        for sub in ("bin", "lib64", "lib/x64", "lib"):
+            add(root / sub)
+
+    for part in os.environ.get("PATH", "").split(os.pathsep):
+        if part:
+            add(Path(part))
+
+    return dirs
 
 
 def _probe_cuda_runtime_libs(
     find_library: Callable[[str], str | None] = ctypes.util.find_library,
 ) -> bool:
     """Return True when required CUDA libs are discoverable or loadable."""
-    search_dirs = _paths_from_ld_library_path()
+    search_dirs = _cuda_library_search_dirs()
     for name in REQUIRED_CUDA_LIBS:
         found = False
-        for candidate in (name, f"{name}.so.12", f"lib{name}.so.12"):
+        for candidate in _find_library_query_names(name):
             if find_library(candidate):
                 found = True
                 break
@@ -81,7 +124,7 @@ def _probe_cuda_runtime_libs(
             for directory in search_dirs:
                 for filename in _library_candidates(name):
                     path = directory / filename
-                    if path.exists():
+                    if path.is_file():
                         found = True
                         break
                 if found:
