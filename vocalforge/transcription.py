@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -18,6 +19,32 @@ BEAM_SIZE_CHOICES = (1, 5, 10)
 
 class TranscriptionCancelled(Exception):
     """Raised when a transcription job is cancelled mid-stream."""
+
+
+def clear_cuda_memory() -> None:
+    """Best-effort free of unused CUDA cache (safe no-op without torch/CUDA)."""
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def is_cuda_oom(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in (
+            "out of memory",
+            "cuda oom",
+            "cudnn_status_alloc_failed",
+            "cuda_error_out_of_memory",
+        )
+    )
 
 
 def format_timestamp(seconds: float) -> str:
@@ -210,3 +237,4 @@ class TranscriptionService:
     def release(self) -> None:
         self._model = None
         self._model_name = None
+        clear_cuda_memory()
