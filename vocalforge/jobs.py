@@ -14,11 +14,16 @@ from vocalforge.audio import AudioRecorder, resolve_input_device_index, save_wav
 from vocalforge.clipboard import ClipboardSettings, deliver_text
 from vocalforge.diarization import DiarizationError, diarize_wav, resolve_diarization_device
 from vocalforge.enhancement import EnhancementError, enhance_wav, is_enhancement_available
-from vocalforge.media import is_supported_upload
+from vocalforge.media import MediaError, ensure_wav, is_supported_upload
 from vocalforge.merge import assign_speakers, format_speaker_transcript, group_words_by_speaker
 from vocalforge.state import AppState, StateMachine
 from vocalforge.storage import AppPaths, enhanced_audio_path, recorded_audio_path, save_transcript
-from vocalforge.transcription import TranscriptionCancelled, TranscriptionService
+from vocalforge.transcription import (
+    TranscriptionCancelled,
+    TranscriptionService,
+    clear_cuda_memory,
+    is_cuda_oom,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -293,14 +298,25 @@ class JobController:
                 self._set_state(AppState.TRANSCRIBING, job_id=job_id)
 
             audio_path = Path(file_path)
+            # Normalize non-WAV uploads (mp4, mp3, …) so Enhance / Diarize / ASR
+            # all see the same mono PCM WAV.
+            if audio_path.suffix.lower() != ".wav":
+                self.emit(
+                    JobEvent(
+                        EventType.STATUS,
+                        job_id=job_id,
+                        payload={"text": "Extracting audio…"},
+                    )
+                )
+                try:
+                    audio_path = ensure_wav(audio_path, self.paths.audio)
+                except MediaError as exc:
+                    logger.warning("Audio extraction failed (%s).", exc)
+                    raise
+
             if self.enhance_audio:
                 if not is_enhancement_available():
                     logger.warning("Enhance audio is on but deep-filter/soxr is unavailable; using original.")
-                elif audio_path.suffix.lower() != ".wav":
-                    logger.warning(
-                        "Enhance audio skips non-WAV upload (%s); transcribing original.",
-                        audio_path.suffix,
-                    )
                 else:
                     self.emit(
                         JobEvent(
@@ -327,82 +343,79 @@ class JobController:
 
             diarization_turns: list[dict[str, Any]] | None = None
             if self.diarize_speakers:
-                if audio_path.suffix.lower() != ".wav":
-                    logger.warning(
-                        "Speaker diarization skips non-WAV upload (%s); unlabeled transcript.",
-                        audio_path.suffix,
+                self.emit(
+                    JobEvent(
+                        EventType.STATUS,
+                        job_id=job_id,
+                        payload={"text": "Diarizing speakers…"},
                     )
-                else:
+                )
+                try:
+                    # Prefer CUDA when torch has it. Unload Whisper first so a
+                    # 4 GB card can run pyannote without sharing VRAM with ASR.
+                    diarize_device = resolve_diarization_device("auto")
+                    saved_model = self.transcription.model_name
+                    saved_device = self.transcription.device
+                    saved_compute = self.transcription.compute_type
+                    unloaded = False
+                    if diarize_device == "cuda" and saved_model and self.transcription.is_ready:
+                        logger.info(
+                            "Temporarily unloading Whisper (%s on %s) for GPU diarization.",
+                            saved_model,
+                            saved_device,
+                        )
+                        self.transcription.release()
+                        unloaded = True
+                    try:
+                        diarization_turns = diarize_wav(
+                            audio_path,
+                            hf_token=self.hf_token,
+                            device=diarize_device,
+                            models_root=self.paths.models,
+                        )
+                    finally:
+                        # Diarization can leave the 4 GB card fragmented; free
+                        # cache before Whisper comes back.
+                        clear_cuda_memory()
+                        if unloaded and saved_model:
+                            self.emit(
+                                JobEvent(
+                                    EventType.STATUS,
+                                    job_id=job_id,
+                                    payload={"text": "Reloading transcription model…"},
+                                )
+                            )
+                            self.transcription.load_model(
+                                saved_model,
+                                device=saved_device,
+                                compute_type=saved_compute,
+                            )
+                    speakers = sorted(
+                        {
+                            str(turn.get("speaker"))
+                            for turn in diarization_turns
+                            if turn.get("speaker")
+                        }
+                    )
+                    logger.info(
+                        "Diarization found %s turn(s), %s speaker(s): %s",
+                        len(diarization_turns),
+                        len(speakers),
+                        ", ".join(speakers) or "(none)",
+                    )
+                except DiarizationError as exc:
+                    logger.warning(
+                        "Diarization failed (%s); continuing with unlabeled ASR.",
+                        exc,
+                    )
+                    diarization_turns = None
                     self.emit(
                         JobEvent(
                             EventType.STATUS,
                             job_id=job_id,
-                            payload={"text": "Diarizing speakers…"},
+                            payload={"text": "Diarization failed — transcribing without speakers…"},
                         )
                     )
-                    try:
-                        # Prefer CUDA when torch has it. Unload Whisper first so a
-                        # 4 GB card can run pyannote without sharing VRAM with ASR.
-                        diarize_device = resolve_diarization_device("auto")
-                        saved_model = self.transcription.model_name
-                        saved_device = self.transcription.device
-                        saved_compute = self.transcription.compute_type
-                        unloaded = False
-                        if diarize_device == "cuda" and saved_model and self.transcription.is_ready:
-                            logger.info(
-                                "Temporarily unloading Whisper (%s on %s) for GPU diarization.",
-                                saved_model,
-                                saved_device,
-                            )
-                            self.transcription.release()
-                            unloaded = True
-                        try:
-                            diarization_turns = diarize_wav(
-                                audio_path,
-                                hf_token=self.hf_token,
-                                device=diarize_device,
-                                models_root=self.paths.models,
-                            )
-                        finally:
-                            if unloaded and saved_model:
-                                self.emit(
-                                    JobEvent(
-                                        EventType.STATUS,
-                                        job_id=job_id,
-                                        payload={"text": "Reloading transcription model…"},
-                                    )
-                                )
-                                self.transcription.load_model(
-                                    saved_model,
-                                    device=saved_device,
-                                    compute_type=saved_compute,
-                                )
-                        speakers = sorted(
-                            {
-                                str(turn.get("speaker"))
-                                for turn in diarization_turns
-                                if turn.get("speaker")
-                            }
-                        )
-                        logger.info(
-                            "Diarization found %s turn(s), %s speaker(s): %s",
-                            len(diarization_turns),
-                            len(speakers),
-                            ", ".join(speakers) or "(none)",
-                        )
-                    except DiarizationError as exc:
-                        logger.warning(
-                            "Diarization failed (%s); continuing with unlabeled ASR.",
-                            exc,
-                        )
-                        diarization_turns = None
-                        self.emit(
-                            JobEvent(
-                                EventType.STATUS,
-                                job_id=job_id,
-                                payload={"text": "Diarization failed — transcribing without speakers…"},
-                            )
-                        )
 
             if self._cancel_transcription.is_set():
                 if self._is_current(job_id):
@@ -447,6 +460,54 @@ class JobController:
                     cancel_event=self._cancel_transcription,
                     progress_callback=on_progress,
                 )
+            except Exception as exc:
+                if not is_cuda_oom(exc) or self.transcription.device == "cpu":
+                    raise
+                # Long files + diarize + medium on 4 GB often OOM mid-decode.
+                model_name = self.transcription.model_name
+                preferred_device = self.transcription.device
+                preferred_compute = self.transcription.compute_type
+                logger.warning(
+                    "GPU transcription OOM (%s); retrying on CPU int8.",
+                    exc,
+                )
+                self.emit(
+                    JobEvent(
+                        EventType.STATUS,
+                        job_id=job_id,
+                        payload={"text": "GPU out of memory — retrying on CPU…"},
+                    )
+                )
+                self.transcription.release()
+                clear_cuda_memory()
+                if not model_name:
+                    raise
+                self.transcription.load_model(
+                    model_name,
+                    device="cpu",
+                    compute_type="int8",
+                )
+                try:
+                    result = self.transcription.transcribe(
+                        audio_path,
+                        cancel_event=self._cancel_transcription,
+                        progress_callback=on_progress,
+                    )
+                finally:
+                    # Restore GPU model for later jobs when possible.
+                    if preferred_device and preferred_device != "cpu":
+                        try:
+                            clear_cuda_memory()
+                            self.transcription.load_model(
+                                model_name,
+                                device=preferred_device,
+                                compute_type=preferred_compute,
+                            )
+                        except Exception as reload_exc:  # noqa: BLE001
+                            logger.warning(
+                                "Could not restore GPU model after CPU fallback (%s); staying on CPU.",
+                                reload_exc,
+                            )
             finally:
                 if restore_word_ts is not None:
                     self.transcription.set_decode_options(word_timestamps=restore_word_ts)

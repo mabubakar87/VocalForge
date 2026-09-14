@@ -199,6 +199,7 @@ class ModernDropdown(tk.Frame):
         self._on_select = on_select
         self._font_family = font_family
         self._popup: tk.Toplevel | None = None
+        self._outside_funcid: str | None = None
         self._selected = selected if selected in self._choices else (self._choices[0] if self._choices else "")
 
         inner = tk.Frame(self, bg=Theme.surface_2)
@@ -295,21 +296,40 @@ class ModernDropdown(tk.Frame):
         popup.geometry(f"{width}x{min(320, 36 * len(self._choices) + 4)}+{x}+{y}")
         popup.deiconify()
         popup.focus_force()
-        popup.bind("<FocusOut>", lambda _e: self.after(120, self._close_if_unfocused))
         popup.bind("<Escape>", lambda _e: self._close_popup())
+        # FocusOut is unreliable for overrideredirect popups on Linux WMs;
+        # close on any click outside the trigger or menu instead.
         self._popup = popup
+        root = self.winfo_toplevel()
+        self._outside_funcid = root.bind("<ButtonPress-1>", self._on_outside_click, add="+")
 
-    def _close_if_unfocused(self) -> None:
+    @staticmethod
+    def _pointer_inside(widget: tk.Misc, event: tk.Event) -> bool:
+        try:
+            if not widget.winfo_exists():
+                return False
+            x0 = widget.winfo_rootx()
+            y0 = widget.winfo_rooty()
+            x1 = x0 + widget.winfo_width()
+            y1 = y0 + widget.winfo_height()
+        except Exception:  # noqa: BLE001
+            return False
+        return x0 <= event.x_root <= x1 and y0 <= event.y_root <= y1
+
+    def _on_outside_click(self, event: tk.Event) -> None:
         if self._popup is None or not self._popup.winfo_exists():
             return
-        try:
-            focused = self._popup.focus_get()
-        except Exception:  # noqa: BLE001
-            focused = None
-        if focused is None:
-            self._close_popup()
+        if self._pointer_inside(self._popup, event) or self._pointer_inside(self, event):
+            return
+        self._close_popup()
 
     def _close_popup(self) -> None:
+        if self._outside_funcid is not None:
+            try:
+                self.winfo_toplevel().unbind("<ButtonPress-1>", self._outside_funcid)
+            except Exception:  # noqa: BLE001
+                pass
+            self._outside_funcid = None
         if self._popup is not None:
             try:
                 self._popup.destroy()

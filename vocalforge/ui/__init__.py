@@ -82,11 +82,13 @@ SESSION_TOOLTIPS = {
         "Useful for reviewing longer files; slightly more work for the model."
     ),
     "enhance": (
-        "When On, WAV recordings/uploads are denoised with DeepFilterNet before "
-        "transcription. Default Off. Requires .deps/deep-filter and soxr."
+        "When On, audio is denoised with DeepFilterNet before transcription "
+        "(non-WAV uploads are converted to WAV first). Default Off. "
+        "Requires .deps/deep-filter and soxr."
     ),
     "diarize": (
-        "When On, speakers are labeled with pyannote before transcription. "
+        "When On, speakers are labeled with pyannote before transcription "
+        "(non-WAV uploads are converted to WAV first). "
         "Uses GPU when CUDA torch is available (Whisper is unloaded briefly "
         "to free VRAM). Needs two different voices for SPEAKER_00 vs SPEAKER_01. "
         "Vendor once: python scripts/vendor_diarization_models.py"
@@ -1637,7 +1639,7 @@ class MainWindow:
         if not is_supported_upload(file_path):
             messagebox.showerror(
                 "Upload",
-                "Unsupported audio format. Try WAV, MP3, M4A, FLAC, OGG, or WebM.",
+                "Unsupported audio format. Try WAV, MP3, M4A, MP4, FLAC, OGG, or WebM.",
             )
             return
         self.controller.transcribe_upload(file_path)
